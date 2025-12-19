@@ -497,6 +497,8 @@ docker run -i --rm \
   ghcr.io/sirkirby/unifi-network-mcp:latest
 ```
 
+Set `UNIFI_MCP_HTTP_PORT` (and optionally `UNIFI_MCP_HTTP_HOST`) if you need a different bind port/host for the SSE endpoint.
+
 Security note: Leave this disabled in production or sensitive environments. The stdio transport remains the default and recommended mode.
 
 ---
@@ -518,6 +520,8 @@ The server merges settings from **environment variables**, an optional `.env` fi
 | `UNIFI_VERIFY_SSL` | Set to `false` if using self-signed certs |
 | `UNIFI_CONTROLLER_TYPE` | Controller API path type: `auto` (detect), `proxy` (UniFi OS), `direct` (standalone). Default `auto` |
 | `UNIFI_MCP_HTTP_ENABLED` | Set `true` to enable optional HTTP SSE server (default `false`) |
+| `UNIFI_MCP_HTTP_HOST` | Bind address for HTTP SSE (default `0.0.0.0`) |
+| `UNIFI_MCP_HTTP_PORT` | Port for HTTP SSE (default `3000`) |
 | `UNIFI_AUTO_CONFIRM` | Set `true` to auto-confirm all mutating operations (skips preview step). Ideal for workflow automation (n8n, Make, Zapier). Default `false` |
 | `UNIFI_TOOL_REGISTRATION_MODE` | Tool loading mode: `lazy` (default), `eager`, or `meta_only`. See [Context Optimization](#context-optimization) |
 | `UNIFI_ENABLED_CATEGORIES` | Comma-separated list of tool categories to load (eager mode). See table below |

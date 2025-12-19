@@ -1,232 +1,258 @@
 """
-UniFi Network MCP hotspot voucher tools.
+Unifi Network MCP hotspot tools.
 
-This module provides MCP tools to manage hotspot vouchers on a UniFi Network Controller.
+This module provides MCP tools to interact with a Unifi Network Controller's hotspot functions,
+including managing hotspot configurations, vouchers, and guest authentication.
+Supports multi-site operations with optional site parameter.
 """
 
 import logging
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, Optional, List
 
-from src.runtime import config, server
-from src.utils.confirmation import create_preview, preview_response, should_auto_confirm
+from src.runtime import config, hotspot_manager, server, system_manager
+from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
+from src.validator_registry import UniFiValidatorRegistry
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
 
-# Lazy import to avoid circular dependencies
-_hotspot_manager = None
-
-
-def _get_hotspot_manager():
-    """Lazy-load the hotspot manager to avoid circular imports."""
-    global _hotspot_manager
-    if _hotspot_manager is None:
-        from src.managers.hotspot_manager import HotspotManager
-        from src.runtime import get_connection_manager
-
-        _hotspot_manager = HotspotManager(get_connection_manager())
-    return _hotspot_manager
-
 
 @server.tool(
-    name="unifi_list_vouchers",
-    description="""List all hotspot vouchers for the current site.
-
-Returns voucher codes, expiration times, usage quotas, and bandwidth limits.
-Vouchers are used for guest network access in captive portal setups.""",
+    name="unifi_list_hotspot_configs",
+    description="List all hotspot configurations on the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def list_vouchers() -> Dict[str, Any]:
-    """List all hotspot vouchers."""
+async def list_hotspot_configs(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for listing hotspot configurations with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with hotspot configurations list and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        hotspot_manager = _get_hotspot_manager()
-        vouchers = await hotspot_manager.get_vouchers()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Format vouchers for readability
-        formatted_vouchers = []
-        for v in vouchers:
-            formatted = {
-                "_id": v.get("_id"),
-                "code": v.get("code"),
-                "quota": v.get("quota", 1),
-                "duration_minutes": v.get("duration"),
-                "used": v.get("used", 0),
-                "create_time": v.get("create_time"),
-                "note": v.get("note"),
-            }
-            # Add bandwidth limits if set
-            if v.get("qos_rate_max_up"):
-                formatted["up_limit_kbps"] = v.get("qos_rate_max_up")
-            if v.get("qos_rate_max_down"):
-                formatted["down_limit_kbps"] = v.get("qos_rate_max_down")
-            if v.get("qos_usage_quota"):
-                formatted["data_limit_mb"] = v.get("qos_usage_quota")
-            formatted_vouchers.append(formatted)
+        configs = await hotspot_manager.get_hotspot_configs(site=site_slug)
 
-        return {
+        # Convert HotspotConfig objects to plain dictionaries
+        configs_raw = [c.raw if hasattr(c, "raw") else c for c in configs]
+
+        return inject_site_metadata({
             "success": True,
-            "site": hotspot_manager._connection.site,
-            "count": len(formatted_vouchers),
-            "vouchers": formatted_vouchers,
-        }
+            "count": len(configs_raw),
+            "hotspot_configs": configs_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error listing vouchers: {e}", exc_info=True)
+        logger.error(f"Error listing hotspot configurations: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_get_voucher_details",
-    description="Get detailed information about a specific voucher by its ID",
+    name="unifi_get_hotspot_config_details",
+    description="Get detailed information about a specific hotspot configuration by ID. Supports multi-site with optional site parameter.",
 )
-async def get_voucher_details(voucher_id: str) -> Dict[str, Any]:
-    """Get details for a specific voucher."""
-    try:
-        hotspot_manager = _get_hotspot_manager()
-        voucher = await hotspot_manager.get_voucher_details(voucher_id)
+async def get_hotspot_config_details(config_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting hotspot configuration details with multi-site support.
 
-        if voucher:
-            return {
+    Args:
+        config_id: The _id of the hotspot configuration
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with hotspot configuration details and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        config = await hotspot_manager.get_hotspot_config_details(config_id, site=site_slug)
+        if config:
+            config_raw = config.raw if hasattr(config, "raw") else config
+            return inject_site_metadata({
                 "success": True,
-                "site": hotspot_manager._connection.site,
-                "voucher": voucher,
-            }
-        return {
-            "success": False,
-            "error": f"Voucher not found with ID: {voucher_id}",
-        }
+                "hotspot_config": config_raw,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Hotspot configuration with ID {config_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting voucher details for {voucher_id}: {e}", exc_info=True)
+        logger.error(f"Error getting hotspot configuration details: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_create_voucher",
-    description="""Create hotspot voucher(s) for guest network access.
-
-Vouchers can have:
-- Time limits: How long the voucher is valid after activation
-- Usage quota: Single-use (1), multi-use (0), or n-times usable
-- Bandwidth limits: Upload/download speed caps in Kbps
-- Data caps: Total data transfer limit in MB""",
-    permission_category="vouchers",
+    name="unifi_create_hotspot_config",
+    description="Create a new hotspot configuration with validation. Supports multi-site with optional site parameter. Requires confirmation.",
+    permission_category="hotspot",
     permission_action="create",
 )
-async def create_voucher(
-    expire_minutes: int = 1440,
-    count: int = 1,
-    quota: int = 1,
-    note: Optional[str] = None,
-    up_limit_kbps: Optional[int] = None,
-    down_limit_kbps: Optional[int] = None,
-    bytes_limit_mb: Optional[int] = None,
-    confirm: bool = False,
-) -> Dict[str, Any]:
-    """Create one or more hotspot vouchers."""
-    if not parse_permission(config.permissions, "voucher", "create"):
-        logger.warning("Permission denied for creating vouchers.")
-        return {"success": False, "error": "Permission denied to create vouchers."}
+async def create_hotspot_config(config_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for creating hotspot configuration with multi-site support.
 
-    if expire_minutes < 1:
-        return {"success": False, "error": "expire_minutes must be at least 1."}
+    Args:
+        config_data: Hotspot configuration data
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
 
-    if count < 1 or count > 10000:
-        return {"success": False, "error": "count must be between 1 and 10000."}
+    Returns:
+        Dict with operation result and site metadata
 
-    if not confirm and not should_auto_confirm():
-        resource_data = {
-            "count": count,
-            "expire_minutes": expire_minutes,
-            "quota": quota,
-        }
-        if note:
-            resource_data["note"] = note
-        if up_limit_kbps:
-            resource_data["up_limit_kbps"] = up_limit_kbps
-        if down_limit_kbps:
-            resource_data["down_limit_kbps"] = down_limit_kbps
-        if bytes_limit_mb:
-            resource_data["bytes_limit_mb"] = bytes_limit_mb
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "hotspot", "create"):
+        logger.warning("Permission denied for creating hotspot configuration.")
+        return {"success": False, "error": "Permission denied to create hotspot configuration."}
 
-        return create_preview(
-            resource_type="voucher",
-            resource_data=resource_data,
-            resource_name=f"{count} voucher(s)",
-        )
+    if not config_data:
+        return {"success": False, "error": "config_data is required"}
 
     try:
-        hotspot_manager = _get_hotspot_manager()
-        vouchers = await hotspot_manager.create_voucher(
-            expire_minutes=expire_minutes,
-            count=count,
-            quota=quota,
-            note=note,
-            up_limit_kbps=up_limit_kbps,
-            down_limit_kbps=down_limit_kbps,
-            bytes_limit_mb=bytes_limit_mb,
-        )
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        if vouchers:
-            return {
+        # Validate the configuration data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("hotspot_config_create", config_data)
+        if not is_valid:
+            logger.warning(f"Invalid hotspot configuration create data: {error_msg}")
+            return {"success": False, "error": f"Invalid hotspot configuration data: {error_msg}"}
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="hotspot_config",
+                resource_name=validated_data.get("name", "Unknown"),
+                resource_data=validated_data,
+            )
+
+        # Create the hotspot configuration
+        result = await hotspot_manager.create_hotspot_config(validated_data, site=site_slug)
+        if result:
+            return inject_site_metadata({
                 "success": True,
-                "message": f"Created {len(vouchers)} voucher(s).",
-                "site": hotspot_manager._connection.site,
-                "count": len(vouchers),
-                "vouchers": vouchers,
-            }
-        return {"success": False, "error": "Failed to create vouchers."}
+                "config_id": result.get("_id"),
+                "details": result,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": "Failed to create hotspot configuration",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error creating vouchers: {e}", exc_info=True)
+        logger.error(f"Error creating hotspot configuration: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_revoke_voucher",
-    description="Revoke/delete a hotspot voucher by its ID, preventing further use",
-    permission_category="vouchers",
+    name="unifi_update_hotspot_config",
+    description="Update a hotspot configuration by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    permission_category="hotspot",
     permission_action="update",
 )
-async def revoke_voucher(voucher_id: str, confirm: bool = False) -> Dict[str, Any]:
-    """Revoke a hotspot voucher."""
-    if not parse_permission(config.permissions, "voucher", "update"):
-        logger.warning(f"Permission denied for revoking voucher ({voucher_id}).")
-        return {"success": False, "error": "Permission denied to revoke vouchers."}
+async def update_hotspot_config(config_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for updating hotspot configuration with multi-site support.
+
+    Args:
+        config_id: The unique identifier (_id) of the hotspot configuration to update
+        update_data: Dictionary of fields to update
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "hotspot", "update"):
+        logger.warning(f"Permission denied for updating hotspot configuration ({config_id}).")
+        return {"success": False, "error": "Permission denied to update hotspot configuration."}
+
+    if not config_id:
+        return {"success": False, "error": "config_id is required"}
+    if not update_data:
+        return {"success": False, "error": "update_data cannot be empty"}
 
     try:
-        hotspot_manager = _get_hotspot_manager()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Fetch voucher details first for preview
+        # Validate the update data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("hotspot_config_update", update_data)
+        if not is_valid:
+            logger.warning(f"Invalid hotspot configuration update data for ID {config_id}: {error_msg}")
+            return {"success": False, "error": f"Invalid update data: {error_msg}"}
+
+        # Fetch current state for preview
+        current = await hotspot_manager.get_hotspot_config_details(config_id, site=site_slug)
+        if not current:
+            return {"success": False, "error": "Hotspot configuration not found"}
+
         if not confirm and not should_auto_confirm():
-            voucher = await hotspot_manager.get_voucher_details(voucher_id)
-            if not voucher:
-                return {"success": False, "error": f"Voucher not found with ID: {voucher_id}"}
-
-            current_state = {}
-            if voucher.get("code"):
-                current_state["code"] = voucher.get("code")
-            if voucher.get("note"):
-                current_state["note"] = voucher.get("note")
-            if voucher.get("quota"):
-                current_state["quota"] = voucher.get("quota")
-            if voucher.get("used") is not None:
-                current_state["used"] = voucher.get("used")
-
-            return preview_response(
-                action="revoke",
-                resource_type="voucher",
-                resource_id=voucher_id,
-                resource_name=voucher.get("code"),
-                current_state=current_state,
-                proposed_changes={"status": "revoked"},
-                warnings=["This voucher will no longer be usable"],
+            return update_preview(
+                resource_type="hotspot_config",
+                resource_id=config_id,
+                resource_name=current.get("name"),
+                current_state=current,
+                updates=validated_data,
             )
 
-        success = await hotspot_manager.revoke_voucher(voucher_id)
-
+        # Perform the update
+        success = await hotspot_manager.update_hotspot_config(config_id, validated_data, site=site_slug)
         if success:
-            return {
+            # Fetch updated details
+            updated = await hotspot_manager.get_hotspot_config_details(config_id, site=site_slug)
+            return inject_site_metadata({
                 "success": True,
-                "message": f"Voucher {voucher_id} revoked successfully.",
-            }
-        return {"success": False, "error": f"Failed to revoke voucher {voucher_id}."}
+                "config_id": config_id,
+                "updated_fields": list(validated_data.keys()),
+                "details": updated,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to update hotspot configuration {config_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error revoking voucher {voucher_id}: {e}", exc_info=True)
+        logger.error(f"Error updating hotspot configuration {config_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

@@ -4,26 +4,91 @@ Firewall policy tools for Unifi Network MCP server.
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from src.runtime import config, firewall_manager, network_manager, server
 from src.utils.confirmation import create_preview, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission  # CORRECTED import name
+from src.utils.site_resolver import (
+    validate_site_parameter,
+    resolve_site_identifier,
+    validate_site_access,
+)
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 from src.validator_registry import UniFiValidatorRegistry  # Added
+import os
 
 logger = logging.getLogger(__name__)
 
 
+def _get_allowed_sites() -> Optional[list]:
+    """
+    Get list of allowed sites from UNIFI_SITE environment variable.
+
+    Returns:
+        List of allowed site slugs if UNIFI_SITE is set, None for ALL-SITES mode.
+    """
+    unifi_site = os.getenv("UNIFI_SITE", "")
+    if not unifi_site:
+        return None  # ALL-SITES mode
+    return [s.strip() for s in unifi_site.split(",") if s.strip()]
+
+
+async def _resolve_site_context(site: Optional[str]) -> Optional[str]:
+    """
+    Resolve site parameter to site slug and set firewall_manager context.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site.
+
+    Returns:
+        Original site slug if site was switched, None otherwise.
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if site is None:
+        return None
+
+    # Validate site parameter
+    site_validated = validate_site_parameter(site)
+
+    # Resolve site identifier
+    site_info = await resolve_site_identifier(site_validated)
+    site_slug = site_info["slug"]
+
+    # Validate whitelist access
+    allowed_sites = _get_allowed_sites()
+    await validate_site_access(site_slug, allowed_sites)
+
+    # Store original site and switch
+    original_site = firewall_manager._connection.site
+    firewall_manager._connection.site = site_slug
+
+    return original_site
+
+
 @server.tool(
     name="unifi_list_firewall_policies",
-    description="List firewall policies configured on the Unifi Network controller.",
+    description="List firewall policies configured on the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def list_firewall_policies(include_predefined: bool = False) -> Dict[str, Any]:
+async def list_firewall_policies(
+    include_predefined: bool = False,
+    site: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Lists firewall policies for the current UniFi site.
+    Lists firewall policies for the current or specified UniFi site.
 
     Args:
         include_predefined (bool): Whether to include predefined system policies (default: False).
+        site: Optional site name/slug. If None, uses current default site.
+              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
 
     Returns:
         A dictionary containing:
@@ -39,6 +104,11 @@ async def list_firewall_policies(include_predefined: bool = False) -> Dict[str, 
             - ruleset (str): The ruleset this policy belongs to (e.g., 'WAN_IN', 'LAN_OUT').
             - description (str): User-provided description of the policy.
         - error (str, optional): An error message if the operation failed.
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
 
     Example response (success):
     {
@@ -65,7 +135,12 @@ async def list_firewall_policies(include_predefined: bool = False) -> Dict[str, 
             "error": "Permission denied to list firewall policies.",
         }
 
+    original_site = None
     try:
+        # Handle site parameter
+        if site is not None:
+            original_site = await _resolve_site_context(site)
+
         policies = await firewall_manager.get_firewall_policies(include_predefined=include_predefined)
         policies_raw = [p.raw if hasattr(p, "raw") else p for p in policies]
 
@@ -90,6 +165,9 @@ async def list_firewall_policies(include_predefined: bool = False) -> Dict[str, 
     except Exception as e:
         logger.error(f"Error listing firewall policies: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+    finally:
+        if original_site is not None:
+            firewall_manager._connection.site = original_site
 
 
 @server.tool(
@@ -264,11 +342,15 @@ async def toggle_firewall_policy(policy_id: str, confirm: bool = False) -> Dict[
 
 @server.tool(
     name="unifi_create_firewall_policy",
-    description="Create a new firewall policy with schema validation.",
+    description="Create a new firewall policy with schema validation. Supports multi-site with optional site parameter.",
     permission_category="firewall_policies",
     permission_action="create",
 )
-async def create_firewall_policy(policy_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
+async def create_firewall_policy(
+    policy_data: Dict[str, Any],
+    confirm: bool = False,
+    site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Creates a new firewall policy based on the provided configuration data.
     This tool performs validation on the input data against the expected UniFi API schema.
@@ -328,6 +410,8 @@ async def create_firewall_policy(policy_data: Dict[str, Any], confirm: bool = Fa
     Args:
         policy_data (Dict[str, Any]): A dictionary containing the firewall policy configuration.
         confirm (bool): Must be explicitly set to `True` to execute the creation. Defaults to `False`.
+        site: Optional site name/slug. If None, uses current default site.
+              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
 
     Returns:
         A dictionary containing:
@@ -336,6 +420,11 @@ async def create_firewall_policy(policy_data: Dict[str, Any], confirm: bool = Fa
         - policy_id (string): The ID (_id) of the newly created policy if successful.
         - details (Dict): Full details of the created policy as returned by the controller.
         - error (string): Error message if unsuccessful (includes validation errors or API errors).
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
     """
     if not parse_permission(config.permissions, "firewall", "create"):
         logger.warning("Permission denied for creating firewall policy.")
@@ -350,47 +439,52 @@ async def create_firewall_policy(policy_data: Dict[str, Any], confirm: bool = Fa
             "error": "policy_data must be a non-empty dictionary.",
         }
 
-    # --- Use Validator Registry for Comprehensive Validation ---
-    # This replaces the basic required field checks below
-    from src.validator_registry import UniFiValidatorRegistry
-
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("firewall_policy_create", policy_data)
-
-    if not is_valid:
-        logger.warning(f"Invalid firewall policy data: {error_msg}")
-        # Provide the specific validation error back to the caller
-        return {"success": False, "error": f"Validation Error: {error_msg}"}
-    # --- End Validation ---
-
-    # Enforce lowercase action (Validator might also handle this depending on schema definition)
-    action = validated_data.get("action", "")
-    if not isinstance(action, str) or action.lower() not in [
-        "accept",
-        "drop",
-        "reject",
-    ]:
-        # This check might be redundant if the validator enforces enum values
-        error = f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
-        logger.warning(error)
-        return {"success": False, "error": error}
-    validated_data["action"] = action.lower()  # Normalize in the validated data
-
-    # Use the validated and potentially cleaned/defaulted data
-    policy_data_to_send = validated_data
-
-    policy_name = policy_data_to_send.get("name", "Unnamed Policy")
-    ruleset = policy_data_to_send.get("ruleset", "Unknown Ruleset")
-
-    if not confirm and not should_auto_confirm():
-        return create_preview(
-            resource_type="firewall_policy",
-            resource_data=policy_data_to_send,
-            resource_name=policy_name,
-        )
-
-    logger.info(f"Attempting to create firewall policy '{policy_name}' in ruleset '{ruleset}'")
-
+    original_site = None
     try:
+        # Handle site parameter
+        if site is not None:
+            original_site = await _resolve_site_context(site)
+
+        # --- Use Validator Registry for Comprehensive Validation ---
+        # This replaces the basic required field checks below
+        from src.validator_registry import UniFiValidatorRegistry
+
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("firewall_policy_create", policy_data)
+
+        if not is_valid:
+            logger.warning(f"Invalid firewall policy data: {error_msg}")
+            # Provide the specific validation error back to the caller
+            return {"success": False, "error": f"Validation Error: {error_msg}"}
+        # --- End Validation ---
+
+        # Enforce lowercase action (Validator might also handle this depending on schema definition)
+        action = validated_data.get("action", "")
+        if not isinstance(action, str) or action.lower() not in [
+            "accept",
+            "drop",
+            "reject",
+        ]:
+            # This check might be redundant if the validator enforces enum values
+            error = f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
+            logger.warning(error)
+            return {"success": False, "error": error}
+        validated_data["action"] = action.lower()  # Normalize in the validated data
+
+        # Use the validated and potentially cleaned/defaulted data
+        policy_data_to_send = validated_data
+
+        policy_name = policy_data_to_send.get("name", "Unnamed Policy")
+        ruleset = policy_data_to_send.get("ruleset", "Unknown Ruleset")
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="firewall_policy",
+                resource_data=policy_data_to_send,
+                resource_name=policy_name,
+            )
+
+        logger.info(f"Attempting to create firewall policy '{policy_name}' in ruleset '{ruleset}'")
+
         # Call the new manager method
         created_policy_obj = await firewall_manager.create_firewall_policy(policy_data_to_send)
 
@@ -417,19 +511,27 @@ async def create_firewall_policy(policy_data: Dict[str, Any], confirm: bool = Fa
     except Exception as e:
         # Catch unexpected errors during the tool's execution
         logger.error(
-            f"Unexpected error creating firewall policy '{policy_name}': {e}",
+            f"Unexpected error creating firewall policy: {e}",
             exc_info=True,
         )
         return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
+    finally:
+        if original_site is not None:
+            firewall_manager._connection.site = original_site
 
 
 @server.tool(
     name="unifi_update_firewall_policy",
-    description="Update specific fields of an existing firewall policy by ID.",
+    description="Update specific fields of an existing firewall policy by ID. Supports multi-site with optional site parameter.",
     permission_category="firewall_policies",
     permission_action="update",
 )
-async def update_firewall_policy(policy_id: str, update_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
+async def update_firewall_policy(
+    policy_id: str,
+    update_data: Dict[str, Any],
+    confirm: bool = False,
+    site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Updates specific fields of an existing firewall policy. Requires confirmation.
 
@@ -457,6 +559,8 @@ async def update_firewall_policy(policy_id: str, update_data: Dict[str, Any], co
             - state_invalid (boolean): New state matching.
             - logging (boolean): New logging state.
         confirm (bool): Must be explicitly set to `True` to execute the update. Defaults to `False`.
+        site: Optional site name/slug. If None, uses current default site.
+              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
 
     Returns:
         A dictionary containing:
@@ -465,6 +569,11 @@ async def update_firewall_policy(policy_id: str, update_data: Dict[str, Any], co
         - updated_fields (List[str]): Field names that were successfully updated.
         - details (Dict[str, Any]): Full details of the policy after the update.
         - error (str, optional): Error message if the operation failed.
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
 
     Example call:
     update_firewall_policy(
@@ -511,7 +620,12 @@ async def update_firewall_policy(policy_id: str, update_data: Dict[str, Any], co
 
     updated_fields_list = list(validated_data.keys())
 
+    original_site = None
     try:
+        # Handle site parameter
+        if site is not None:
+            original_site = await _resolve_site_context(site)
+
         # Fetch current policy state for preview
         policies = await firewall_manager.get_firewall_policies(include_predefined=True)
         current_policy_obj = next((p for p in policies if p.id == policy_id), None)
@@ -565,6 +679,9 @@ async def update_firewall_policy(policy_id: str, update_data: Dict[str, Any], co
     except Exception as e:
         logger.error(f"Error updating firewall policy {policy_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
+    finally:
+        if original_site is not None:
+            firewall_manager._connection.site = original_site
 
 
 @server.tool(

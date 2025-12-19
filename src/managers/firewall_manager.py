@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -28,51 +29,58 @@ class FirewallManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_firewall_policies(self, include_predefined: bool = False) -> List[FirewallPolicy]:
+    async def get_firewall_policies(self, include_predefined: bool = False, site: Optional[str] = None) -> List[FirewallPolicy]:
         """Get firewall policies.
 
         Args:
             include_predefined: Whether to include predefined policies.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of FirewallPolicy objects.
         """
-        cache_key = f"{CACHE_PREFIX_FIREWALL_POLICIES}_{include_predefined}_{self._connection.site}"
-        cached_data: Optional[List[FirewallPolicy]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_FIREWALL_POLICIES}_{include_predefined}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        if not await self._connection.ensure_connected():
-            return []
+        async with lock:
+            cached_data: Optional[List[FirewallPolicy]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-        try:
-            api_request = ApiRequestV2(method="get", path="/firewall-policies")
+            if not await self._connection.ensure_connected():
+                return []
 
-            response = await self._connection.request(api_request)
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-            policies_data = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
+                api_request = ApiRequestV2(method="get", path="/firewall-policies")
+                response = await self._connection.request(api_request)
+                policies_data = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
+                policies: List[FirewallPolicy] = [FirewallPolicy(p) for p in policies_data]
+                if not include_predefined:
+                    policies = [p for p in policies if not p.predefined]
 
-            policies: List[FirewallPolicy] = [FirewallPolicy(p) for p in policies_data]
+                self._connection._update_cache(cache_key, policies)
+                return policies
+            except Exception as e:
+                logger.error(f"Error getting firewall policies (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
 
-            if not include_predefined:
-                policies = [p for p in policies if not p.predefined]
-
-            result = policies
-
-            self._connection._update_cache(cache_key, result)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting firewall policies: {e}")
-            return []
-
-    async def toggle_firewall_policy(self, policy_id: str) -> bool:
+    async def toggle_firewall_policy(self, policy_id: str, site: Optional[str] = None) -> bool:
         """Toggle a firewall policy on/off.
 
         Args:
@@ -82,7 +90,7 @@ class FirewallManager:
             bool: True if successful, False otherwise.
         """
         try:
-            policies = await self.get_firewall_policies(include_predefined=True)
+            policies = await self.get_firewall_policies(include_predefined=True, site=site)
             policy: Optional[FirewallPolicy] = next((p for p in policies if p.id == policy_id), None)
 
             if not policy:
@@ -99,17 +107,25 @@ class FirewallManager:
                 path=f"/firewall-policies/{policy_id}",
                 data=update_payload,
             )
-            await self._connection.request(api_request)
+            target_site = site or self._connection.site
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_True_{self._connection.site}")
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_False_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_True_{target_site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_False_{target_site}")
 
             return True
         except Exception as e:
             logger.error(f"Error toggling firewall policy {policy_id}: {e}")
             return False
 
-    async def update_firewall_policy(self, policy_id: str, updates: Dict[str, Any]) -> bool:
+    async def update_firewall_policy(self, policy_id: str, updates: Dict[str, Any], site: Optional[str] = None) -> bool:
         """Update specific fields of a firewall policy.
 
         Args:
@@ -127,7 +143,7 @@ class FirewallManager:
             return False  # Or maybe True, as no action was needed? Returning False for clarity.
 
         try:
-            all_policies = await self.get_firewall_policies(include_predefined=True)
+            all_policies = await self.get_firewall_policies(include_predefined=True, site=site)
             policy_to_update: Optional[FirewallPolicy] = next((p for p in all_policies if p.id == policy_id), None)
 
             if not policy_to_update:
@@ -158,42 +174,47 @@ class FirewallManager:
             logger.error(f"Error updating firewall policy {policy_id}: {e}", exc_info=True)
             return False
 
-    async def get_traffic_routes(self) -> List[TrafficRoute]:
+    async def get_traffic_routes(self, site: Optional[str] = None) -> List[TrafficRoute]:
         """Get all traffic routes.
 
         Returns:
             List of TrafficRoute objects.
         """
-        cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}"
-        cached_data: Optional[List[TrafficRoute]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        if not await self._connection.ensure_connected():
-            return []
+        async with lock:
+            cached_data: Optional[List[TrafficRoute]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-        try:
-            api_request = ApiRequestV2(method="get", path="/trafficroutes")
+            if not await self._connection.ensure_connected():
+                return []
 
-            response = await self._connection.request(api_request)
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-            routes_data = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
-
-            routes: List[TrafficRoute] = [TrafficRoute(r) for r in routes_data]
-
-            result = routes
-
-            self._connection._update_cache(cache_key, result)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting traffic routes: {e}")
-            return []
+                api_request = ApiRequestV2(method="get", path="/trafficroutes")
+                response = await self._connection.request(api_request)
+                routes_data = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
+                routes = [TrafficRoute(r) for r in routes_data]
+                self._connection._update_cache(cache_key, routes)
+                return routes
+            except Exception as e:
+                logger.error(f"Error getting traffic routes (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
 
     async def update_traffic_route(self, route_id: str, updates: Dict[str, Any]) -> bool:
         """Update specific fields of a traffic route using the V2 API.
@@ -287,7 +308,7 @@ class FirewallManager:
             logger.error(f"Error toggling traffic route {route_id}: {e}", exc_info=True)
             return False
 
-    async def create_traffic_route(self, route_data: Dict[str, Any]) -> Optional[Dict]:
+    async def create_traffic_route(self, route_data: Dict[str, Any], site: Optional[str] = None) -> Optional[Dict]:
         """Create a new traffic route. Returns the created route data dict or None.
 
         Args:
@@ -312,14 +333,23 @@ class FirewallManager:
 
             # Use ApiRequestV2 for the creation
             api_request = ApiRequestV2(method="post", path=api_path, data=route_data)
-            response = await self._connection.request(api_request)
+
+            target_site = site or self._connection.site
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                response = await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             # Check response structure for success and ID (adjust based on actual V2 response)
             # Example V2 success might be a 201 Created with the new object or ID in body/headers
             if isinstance(response, dict) and response.get("_id"):  # Simple check if response is the new object
                 new_id = response.get("_id")
                 logger.info(f"Successfully created traffic route via V2. New ID: {new_id}")
-                self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}")
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}")
                 # Return a clear success dictionary with the ID
                 return {"success": True, "route_id": new_id}
             elif (
@@ -327,7 +357,7 @@ class FirewallManager:
             ):  # Sometimes APIs return a list containing the single new item
                 new_id = response[0].get("_id")
                 logger.info(f"Successfully created traffic route via V2 (list response). New ID: {new_id}")
-                self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}")
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}")
                 # Return a clear success dictionary with the ID
                 return {"success": True, "route_id": new_id}
             else:
@@ -358,7 +388,7 @@ class FirewallManager:
             # Return a clear failure dictionary with the extracted error message
             return {"success": False, "error": f"API Error: {api_error_message}"}
 
-    async def delete_traffic_route(self, route_id: str) -> bool:
+    async def delete_traffic_route(self, route_id: str, site: Optional[str] = None) -> bool:
         """Delete a traffic route by ID.
 
         Args:
@@ -370,53 +400,63 @@ class FirewallManager:
         if not await self._connection.ensure_connected():
             return False
         try:
-            # Use V2 endpoint for deletion
+            target_site = site or self._connection.site
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+
             api_request = ApiRequestV2(method="delete", path=f"/trafficroutes/{route_id}")
             await self._connection.request(api_request)
 
-            cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}"
+            cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}"
             self._connection._invalidate_cache(cache_key)
             logger.info(f"Successfully deleted traffic route {route_id}")
             return True
         except Exception as e:
-            # Handle specific "not found" errors if possible?
             logger.error(f"Error deleting traffic route {route_id}: {e}", exc_info=True)
             return False
+        finally:
+            if target_site != self._connection.site:
+                await self._connection.set_site(original_site)
 
-    async def get_port_forwards(self) -> List[PortForward]:
+    async def get_port_forwards(self, site: Optional[str] = None) -> List[PortForward]:
         """Get all port forwarding rules.
         Returns:
              List of PortForward objects.
         """
-        cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{self._connection.site}"
-        cached_data: Optional[List[PortForward]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        if not await self._connection.ensure_connected():
-            return []
+        async with lock:
+            cached_data: Optional[List[PortForward]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-        try:
-            api_request = ApiRequest(method="get", path="/rest/portforward")
-            response = await self._connection.request(api_request)
-            rules_data = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
-            rules: List[PortForward] = [PortForward(r) for r in rules_data]
+            if not await self._connection.ensure_connected():
+                return []
 
-            result = rules
+            async def fetch():
+                api_request = ApiRequest(method="get", path="/rest/portforward")
+                response = await self._connection.request(api_request)
+                rules_data = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
+                return [PortForward(r) for r in rules_data]
 
-            self._connection._update_cache(cache_key, result)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting port forwards: {e}")
-            return []
+            try:
+                rules = await self._with_site(target_site, fetch)
+                self._connection._update_cache(cache_key, rules)
+                return rules
+            except Exception as e:
+                logger.error(f"Error getting port forwards (site={target_site}): {e}")
+                return []
 
-    async def get_port_forward_by_id(self, rule_id: str) -> Optional[PortForward]:
+    async def get_port_forward_by_id(self, rule_id: str, site: Optional[str] = None) -> Optional[PortForward]:
         """Get a specific port forwarding rule by ID.
 
         Args:
@@ -426,13 +466,13 @@ class FirewallManager:
             The PortForward object, or None if not found.
         """
         try:
-            rules = await self.get_port_forwards()
+            rules = await self.get_port_forwards(site=site)
             return next((rule for rule in rules if rule.id == rule_id), None)
         except Exception as e:
             logger.error(f"Error getting port forward by ID {rule_id}: {e}")
             return None
 
-    async def update_port_forward(self, rule_id: str, updates: Dict[str, Any]) -> bool:
+    async def update_port_forward(self, rule_id: str, updates: Dict[str, Any], site: Optional[str] = None) -> bool:
         """Update specific fields of a port forwarding rule.
 
         Args:
@@ -450,7 +490,7 @@ class FirewallManager:
 
         try:
             # Fetch existing rule data
-            rule_to_update_obj = await self.get_port_forward_by_id(rule_id)
+            rule_to_update_obj = await self.get_port_forward_by_id(rule_id, site=site)
 
             if not rule_to_update_obj:
                 logger.error(f"Port forward {rule_id} not found for update.")
@@ -476,10 +516,11 @@ class FirewallManager:
                 data=update_payload,
             )
 
-            await self._connection.request(api_request)
+            await self._with_site(site or self._connection.site, lambda: self._connection.request(api_request))
 
             # Invalidate cache
-            cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{self._connection.site}"
+            target_site = site or self._connection.site
+            cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{target_site}"
             self._connection._invalidate_cache(cache_key)
 
             logger.info(f"Successfully submitted update for port forward {rule_id}.")
@@ -488,7 +529,7 @@ class FirewallManager:
             logger.error(f"Error updating port forward {rule_id}: {e}", exc_info=True)
             return False
 
-    async def toggle_port_forward(self, rule_id: str) -> bool:
+    async def toggle_port_forward(self, rule_id: str, site: Optional[str] = None) -> bool:
         """Toggle a port forwarding rule on/off.
 
         Args:
@@ -498,7 +539,7 @@ class FirewallManager:
             bool: True if successful, False otherwise.
         """
         try:
-            rule = await self.get_port_forward_by_id(rule_id)
+            rule = await self.get_port_forward_by_id(rule_id, site=site)
             if not rule:
                 logger.error(f"Port forward rule {rule_id} not found.")
                 return False
@@ -512,13 +553,13 @@ class FirewallManager:
 
             # Use the update method
             update_payload = {"enabled": new_state}
-            return await self.update_port_forward(rule_id, update_payload)
+            return await self.update_port_forward(rule_id, update_payload, site=site)
 
         except Exception as e:
             logger.error(f"Error toggling port forward {rule_id}: {e}", exc_info=True)
             return False
 
-    async def create_port_forward(self, rule_data: Dict[str, Any]) -> Optional[Dict]:
+    async def create_port_forward(self, rule_data: Dict[str, Any], site: Optional[str] = None) -> Optional[Dict]:
         """Create a new port forwarding rule. Returns the created rule data dict or None.
 
         Args:
@@ -569,7 +610,7 @@ class FirewallManager:
             )
             return None
 
-    async def delete_port_forward(self, rule_id: str) -> bool:
+    async def delete_port_forward(self, rule_id: str, site: Optional[str] = None) -> bool:
         """Delete a port forwarding rule by ID.
 
         Args:
@@ -586,9 +627,10 @@ class FirewallManager:
                 method="delete",
                 path=f"/rest/portforward/{rule_id}",
             )
-            await self._connection.request(api_request)
+            await self._with_site(site or self._connection.site, lambda: self._connection.request(api_request))
 
-            cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{self._connection.site}"
+            target_site = site or self._connection.site
+            cache_key = f"{CACHE_PREFIX_PORT_FORWARDS}_{target_site}"
             self._connection._invalidate_cache(cache_key)
             logger.info(f"Successfully deleted port forward {rule_id}")
             return True
@@ -596,7 +638,7 @@ class FirewallManager:
             logger.error(f"Error deleting port forward {rule_id}: {e}", exc_info=True)
             return False
 
-    async def create_firewall_policy(self, policy_data: Dict[str, Any]) -> Optional[FirewallPolicy]:
+    async def create_firewall_policy(self, policy_data: Dict[str, Any], site: Optional[str] = None) -> Optional[FirewallPolicy]:
         """Create a new firewall policy using the V2 API.
 
         Args:
@@ -617,7 +659,15 @@ class FirewallManager:
 
             api_request = ApiRequestV2(method="post", path="/firewall-policies", data=policy_data)
 
-            response = await self._connection.request(api_request)
+            target_site = site or self._connection.site
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                response = await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             # V2 POST often returns the created object directly or within a list
             created_policy_data = None
@@ -630,8 +680,8 @@ class FirewallManager:
                 new_policy_id = created_policy_data.get("_id")
                 logger.info(f"Successfully created firewall policy '{policy_name}' with ID {new_policy_id} via V2.")
                 # Invalidate caches after successful creation
-                self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_True_{self._connection.site}")
-                self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_False_{self._connection.site}")
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_True_{target_site}")
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_FIREWALL_POLICIES}_False_{target_site}")
                 return FirewallPolicy(created_policy_data)
             else:
                 logger.error(

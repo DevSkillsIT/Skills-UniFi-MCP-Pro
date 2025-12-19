@@ -3,6 +3,7 @@
 Manages static route operations for advanced routing configuration.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -25,39 +26,54 @@ class RoutingManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_routes(self) -> List[Dict[str, Any]]:
-        """Get all user-defined static routes for the current site.
+    async def get_routes(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all user-defined static routes for the specified site.
 
         Uses GET /rest/routing endpoint.
 
         Returns:
             List of route objects containing network, nexthop, and settings.
         """
-        cache_key = f"{CACHE_PREFIX_ROUTES}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_ROUTES}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequest(method="get", path="/rest/routing")
-            response = await self._connection.request(api_request)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-            routes = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
+            if not await self._connection.ensure_connected():
+                return []
 
-            self._connection._update_cache(cache_key, routes)
-            return routes
-        except Exception as e:
-            logger.error(f"Error getting routes: {e}")
-            return []
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-    async def get_active_routes(self) -> List[Dict[str, Any]]:
+                api_request = ApiRequest(method="get", path="/rest/routing")
+                response = await self._connection.request(api_request)
+
+                routes = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
+
+                self._connection._update_cache(cache_key, routes)
+                return routes
+            except Exception as e:
+                logger.error(f"Error getting routes (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_active_routes(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all active routes (including system routes) from the device.
 
         Note: This uses an undocumented /stat/routing endpoint that may not
@@ -68,7 +84,12 @@ class RoutingManager:
             List of active route objects from the routing table, or empty
             list if the endpoint is unavailable.
         """
+        target_site = site or self._connection.site
         try:
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+
             api_request = ApiRequest(method="get", path="/stat/routing")
             response = await self._connection.request(api_request)
 
@@ -86,20 +107,24 @@ class RoutingManager:
             if "404" in str(e) or "Not Found" in str(e):
                 logger.debug("Active routes endpoint /stat/routing not available on this controller")
             else:
-                logger.error(f"Error getting active routes: {e}")
+                logger.error(f"Error getting active routes (site={target_site}): {e}")
             return []
+        finally:
+            if target_site != self._connection.site:
+                await self._connection.set_site(original_site)
 
-    async def get_route_details(self, route_id: str) -> Optional[Dict[str, Any]]:
+    async def get_route_details(self, route_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get details for a specific route by ID.
 
         Args:
             route_id: The _id of the route.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Route object or None if not found.
         """
         try:
-            all_routes = await self.get_routes()
+            all_routes = await self.get_routes(site=site)
             route = next((r for r in all_routes if r.get("_id") == route_id), None)
             if not route:
                 logger.debug(f"Route {route_id} not found.")
@@ -116,6 +141,7 @@ class RoutingManager:
         static_route_distance: int = 1,
         enabled: bool = True,
         route_type: str = "nexthop-route",
+        site: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a new static route.
 
@@ -128,10 +154,12 @@ class RoutingManager:
             static_route_distance: Administrative distance (default 1).
             enabled: Whether the route is enabled (default True).
             route_type: Route type (default "nexthop-route").
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Created route object, or None on failure.
         """
+        target_site = site or self._connection.site
         try:
             payload: Dict[str, Any] = {
                 "name": name,
@@ -147,12 +175,19 @@ class RoutingManager:
                 path="/rest/routing",
                 data=payload,
             )
-            response = await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                response = await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             logger.info(f"Created route: {name} -> {static_route_network} via {static_route_nexthop}")
 
             # Invalidate cache
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_ROUTES}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_ROUTES}_{target_site}")
 
             # Return the created route
             if isinstance(response, list) and len(response) > 0:
@@ -174,6 +209,7 @@ class RoutingManager:
         static_route_nexthop: Optional[str] = None,
         static_route_distance: Optional[int] = None,
         enabled: Optional[bool] = None,
+        site: Optional[str] = None,
     ) -> bool:
         """Update an existing static route.
 
@@ -187,13 +223,15 @@ class RoutingManager:
             static_route_nexthop: Optional new next-hop address.
             static_route_distance: Optional new administrative distance.
             enabled: Optional enable/disable setting.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
             # Get current route data first
-            current = await self.get_route_details(route_id)
+            current = await self.get_route_details(route_id, site=site)
             if not current:
                 logger.error(f"Route {route_id} not found for update.")
                 return False
@@ -218,15 +256,57 @@ class RoutingManager:
                 path=f"/rest/routing/{route_id}",
                 data=payload,
             )
-            await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             logger.info(f"Updated route {route_id}")
 
             # Invalidate cache
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_ROUTES}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_ROUTES}_{target_site}")
 
             return True
 
         except Exception as e:
             logger.error(f"Error updating route {route_id}: {e}", exc_info=True)
+            return False
+
+    async def delete_route(self, route_id: str, site: Optional[str] = None) -> bool:
+        """Delete a static route.
+
+        Uses DELETE to /rest/routing/{route_id} endpoint.
+
+        Args:
+            route_id: The _id of the route to delete.
+            site: Target site ID (slug). If None, uses current connection site.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        target_site = site or self._connection.site
+        try:
+            api_request = ApiRequest(method="delete", path=f"/rest/routing/{route_id}")
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
+
+            logger.info(f"Deleted route {route_id}")
+
+            # Invalidate cache
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_ROUTES}_{target_site}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error deleting route {route_id}: {e}", exc_info=True)
             return False

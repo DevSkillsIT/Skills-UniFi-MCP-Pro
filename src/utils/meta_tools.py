@@ -5,12 +5,69 @@ that work in both MCP server mode and dev console mode.
 """
 
 import logging
-from typing import TYPE_CHECKING, Callable, List
+import os
+from typing import TYPE_CHECKING, Callable, List, Optional
 
 if TYPE_CHECKING:
     from src.utils.lazy_tool_loader import LazyToolLoader
 
 logger = logging.getLogger("unifi-network-mcp")
+
+# Import site resolver for display name → slug resolution
+from src.utils.site_resolver import resolve_site_identifier
+from src.exceptions import SiteNotFoundError
+
+
+def validate_site_parameter(site: Optional[str]) -> Optional[str]:
+    """Validate and normalize site parameter against UNIFI_ALLOWED_SITES whitelist.
+
+    Args:
+        site: Site parameter to validate (can be None)
+
+    Returns:
+        Validated site slug or None
+
+    Raises:
+        ValueError: If site parameter is invalid or not allowed
+    """
+    if site is None:
+        return None
+
+    # Load allowed sites from environment
+    allowed_sites_str = os.getenv("UNIFI_ALLOWED_SITES", "")
+    if not allowed_sites_str:
+        logger.warning("UNIFI_ALLOWED_SITES not configured - allowing all sites")
+        return site.strip()
+
+    allowed_sites = [s.strip() for s in allowed_sites_str.split(",") if s.strip()]
+
+    # Normalize input
+    site_normalized = site.strip().lower()
+
+    # Load friendly name mappings dynamically from environment
+    # Format: UNIFI_SITE_ALIASES=friendly1:actual_slug1,friendly2:actual_slug2
+    aliases_str = os.getenv("UNIFI_SITE_ALIASES", "")
+    friendly_map = {"default": "default"}  # Always include default
+
+    if aliases_str:
+        for alias_pair in aliases_str.split(","):
+            if ":" in alias_pair:
+                friendly, actual = alias_pair.split(":", 1)
+                friendly_map[friendly.strip().lower()] = actual.strip()
+
+    # Try friendly name resolution
+    resolved_site = friendly_map.get(site_normalized, site_normalized)
+
+    # Validate against whitelist (case-insensitive)
+    allowed_sites_lower = [s.lower() for s in allowed_sites]
+    if resolved_site not in allowed_sites_lower:
+        raise ValueError(
+            f"Site '{site}' not allowed. Allowed sites: {', '.join(allowed_sites)}"
+        )
+
+    # Return original casing from whitelist
+    idx = allowed_sites_lower.index(resolved_site)
+    return allowed_sites[idx]
 
 
 def register_meta_tools(
@@ -78,13 +135,48 @@ WORKFLOW: Call unifi_tool_index first to find the right tool, then execute it he
 PARAMETERS:
 - tool: Tool name from unifi_tool_index
 - arguments: Tool parameters (see tool schema from unifi_tool_index)
+- site: Optional site name/slug for multi-site support (accepts fuzzy matching)
+
+MULTI-SITE SUPPORT:
+If 'site' parameter is provided, it will be automatically injected into the tool's arguments.
+The site resolver will:
+1. Validate the site parameter (alphanumeric + hyphen/underscore only)
+2. Resolve friendly names to site slugs (e.g., "wink" → "grupo-wink")
+3. Validate access against UNIFI_SITE whitelist (if configured)
+4. Execute the tool in the context of the specified site
+5. Restore the original site context after execution
 
 For bulk/parallel operations, use unifi_batch instead.""",
     )
-    async def execute_handler(tool: str, arguments: dict = None) -> dict:
-        """Execute a UniFi tool synchronously."""
+    async def execute_handler(tool: str, arguments: dict = None, site: str = None) -> dict:
+        """Execute a UniFi tool synchronously with optional site context.
+
+        Args:
+            tool: Tool name from unifi_tool_index
+            arguments: Tool parameters (defaults to {})
+            site: Optional site name/slug for multi-site support
+
+        Returns:
+            Tool execution result or error dict
+        """
         if arguments is None:
             arguments = {}
+
+        # Validate and resolve site parameter
+        if site is not None:
+            try:
+                validated_site = validate_site_parameter(site)
+                if validated_site:
+                    # Resolve display name to actual site slug
+                    resolved = await resolve_site_identifier(validated_site)
+                    arguments = {**arguments, "site": resolved["slug"]}
+                    logger.info(f"Site resolved: '{site}' → '{validated_site}' → slug '{resolved['slug']}'")
+            except ValueError as e:
+                logger.error(f"Site validation failed for '{site}': {e}")
+                return {"error": str(e)}
+            except SiteNotFoundError as e:
+                logger.error(f"Site resolution failed for '{site}': {e}")
+                return {"error": str(e)}
 
         try:
             result = await server.call_tool(tool, arguments)
@@ -95,13 +187,17 @@ For bulk/parallel operations, use unifi_batch instead.""",
 
     register_tool(
         name="unifi_execute",
-        description="Execute a tool discovered via unifi_tool_index. Call unifi_tool_index first.",
+        description="Execute a tool discovered via unifi_tool_index. Supports optional site parameter for multi-site operations.",
         input_schema={
             "type": "object",
             "required": ["tool"],
             "properties": {
                 "tool": {"type": "string", "description": "Tool name from unifi_tool_index"},
                 "arguments": {"type": "object", "description": "Tool parameters from schema"},
+                "site": {
+                    "type": "string",
+                    "description": "Optional site name/slug for multi-site support. Accepts fuzzy matching (e.g., 'wink', 'Grupo Wink')."
+                },
             },
         },
         output_schema={"type": "object", "description": "Tool result"},
@@ -112,20 +208,34 @@ For bulk/parallel operations, use unifi_batch instead.""",
     # =========================================================================
     @tool_decorator(
         name="unifi_batch",
-        description="""Execute multiple UniFi tools in parallel.
+        description="""Execute multiple UniFi tools in parallel with optional multi-site support.
 
 WORKFLOW: Call unifi_tool_index first to discover tools, then batch execute them here.
 
 Returns job IDs for each operation. Use unifi_batch_status to check progress and get results.
 
 PARAMETERS:
-- operations: Array of {tool, arguments} objects where tool names come from unifi_tool_index
+- operations: Array of {tool, arguments, site?} objects where tool names come from unifi_tool_index
+- site: Optional global site parameter that applies to all operations (overridden by per-operation site)
 
-USE FOR: Bulk operations, parallel execution, long-running tasks.
+MULTI-SITE SUPPORT:
+- Global site: Applies to all operations unless overridden
+- Per-operation site: Each operation can specify its own site parameter
+- Priority: Per-operation site > Global site > Default site
+
+USE FOR: Bulk operations, parallel execution, long-running tasks, multi-site batch queries.
 FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
     )
-    async def batch_handler(operations: List[dict]) -> dict:
-        """Execute multiple operations in parallel."""
+    async def batch_handler(operations: List[dict], site: str = None) -> dict:
+        """Execute multiple operations in parallel with optional site context.
+
+        Args:
+            operations: Array of {tool, arguments, site?} objects
+            site: Optional global site parameter (applies to all operations unless overridden)
+
+        Returns:
+            Dictionary with jobs array and optional errors
+        """
         if not operations:
             return {"error": "No operations specified", "jobs": []}
 
@@ -135,10 +245,34 @@ FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
         for i, op in enumerate(operations):
             tool = op.get("tool")
             arguments = op.get("arguments", {})
+            op_site = op.get("site")  # Per-operation site parameter
 
             if not tool:
                 errors.append({"index": i, "error": "Missing 'tool' field"})
                 continue
+
+            # Determine effective site parameter (priority: per-operation > global)
+            effective_site = op_site if op_site is not None else site
+
+            # Validate and resolve site parameter
+            if effective_site is not None:
+                try:
+                    validated_site = validate_site_parameter(effective_site)
+                    if validated_site:
+                        # Resolve display name to actual site slug
+                        resolved = await resolve_site_identifier(validated_site)
+                        arguments = {**arguments, "site": resolved["slug"]}
+                        logger.info(
+                            f"Batch operation {i} ({tool}): Site resolved '{effective_site}' → '{validated_site}' → slug '{resolved['slug']}'"
+                        )
+                except ValueError as e:
+                    logger.error(f"Batch operation {i}: Site validation failed for '{effective_site}': {e}")
+                    errors.append({"index": i, "tool": tool, "error": str(e)})
+                    continue
+                except SiteNotFoundError as e:
+                    logger.error(f"Batch operation {i}: Site resolution failed for '{effective_site}': {e}")
+                    errors.append({"index": i, "tool": tool, "error": str(e)})
+                    continue
 
             try:
                 # Create a closure that captures the current tool and arguments
@@ -170,7 +304,7 @@ FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
 
     register_tool(
         name="unifi_batch",
-        description="Execute multiple tools in parallel. Returns job IDs for status checking.",
+        description="Execute multiple tools in parallel with multi-site support. Returns job IDs for status checking.",
         input_schema={
             "type": "object",
             "required": ["operations"],
@@ -181,11 +315,19 @@ FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
                         "type": "object",
                         "required": ["tool"],
                         "properties": {
-                            "tool": {"type": "string"},
-                            "arguments": {"type": "object"},
+                            "tool": {"type": "string", "description": "Tool name from unifi_tool_index"},
+                            "arguments": {"type": "object", "description": "Tool parameters"},
+                            "site": {
+                                "type": "string",
+                                "description": "Optional per-operation site (overrides global site)",
+                            },
                         },
                     },
-                    "description": "Array of {tool, arguments} objects",
+                    "description": "Array of {tool, arguments, site?} objects",
+                },
+                "site": {
+                    "type": "string",
+                    "description": "Optional global site parameter (applies to all operations unless overridden)",
                 },
             },
         },

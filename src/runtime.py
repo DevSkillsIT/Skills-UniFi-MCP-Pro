@@ -19,7 +19,7 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from src.bootstrap import load_config, logger
+from src.bootstrap import load_config, logger, DEFAULT_SITE
 from src.managers.client_manager import ClientManager
 from src.managers.connection_manager import ConnectionManager
 from src.managers.device_manager import DeviceManager
@@ -71,7 +71,7 @@ def get_connection_manager() -> ConnectionManager:
         username=cfg.username,
         password=cfg.password,
         port=cfg.port,
-        site=cfg.site,
+        site=getattr(cfg, "site", None) or DEFAULT_SITE,
         verify_ssl=cfg.verify_ssl,
     )
 

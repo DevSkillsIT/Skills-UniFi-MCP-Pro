@@ -1,6 +1,7 @@
+import asyncio
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from aiounifi.models.api import ApiRequest
 from aiounifi.models.dpi_restriction_app import DPIRestrictionApp  # Import DPIApp model
@@ -34,108 +35,151 @@ class StatsManager:
         """
         self._connection = connection_manager
         self._client_manager = client_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_network_stats(self, duration_hours: int = 1) -> List[Dict[str, Any]]:
+    async def get_network_stats(self, duration_hours: int = 1, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get network statistics (e.g., hourly site stats)."""
-        cache_key = f"{CACHE_PREFIX_STATS_NETWORK}_{duration_hours}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_STATS_NETWORK}_{duration_hours}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
-            end_time = int(datetime.now().timestamp() * 1000)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
+            if cached_data is not None:
+                return cached_data
 
-            endpoint = "/stat/report/hourly.site"
-            # Use non-rate attributes commonly available on report endpoints
-            payload = {
-                "attrs": [
-                    "bytes",  # total bytes (if provided by controller)
-                    "rx_bytes",  # some controllers provide rx/tx at site level
-                    "tx_bytes",
-                    "num_user",
-                    "num_sta",
-                    "num_active_user",
-                ],
-                "start": start_time,
-                "end": end_time,
-            }
-            api_request = ApiRequest(method="post", path=endpoint, data=payload)
-            response = await self._connection.request(api_request)
-            result = response if isinstance(response, list) else []
-            self._connection._update_cache(cache_key, result, timeout=300)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting network stats: {e}")
-            return []
+            if not await self._connection.ensure_connected():
+                return []
 
-    async def get_client_stats(self, client_mac: str, duration_hours: int = 1) -> List[Dict[str, Any]]:
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
+                end_time = int(datetime.now().timestamp() * 1000)
+
+                endpoint = "/stat/report/hourly.site"
+                # Use non-rate attributes commonly available on report endpoints
+                payload = {
+                    "attrs": [
+                        "bytes",  # total bytes (if provided by controller)
+                        "rx_bytes",  # some controllers provide rx/tx at site level
+                        "tx_bytes",
+                        "num_user",
+                        "num_sta",
+                        "num_active_user",
+                    ],
+                    "start": start_time,
+                    "end": end_time,
+                }
+                api_request = ApiRequest(method="post", path=endpoint, data=payload)
+                response = await self._connection.request(api_request)
+                result = response if isinstance(response, list) else []
+                self._connection._update_cache(cache_key, result, timeout=300)
+                return result
+            except Exception as e:
+                logger.error(f"Error getting network stats (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_client_stats(self, client_mac: str, duration_hours: int = 1, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get statistics for a specific client."""
-        cache_key = f"{CACHE_PREFIX_STATS_CLIENT}_{client_mac}_{duration_hours}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_STATS_CLIENT}_{client_mac}_{duration_hours}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
-            end_time = int(datetime.now().timestamp() * 1000)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
+            if cached_data is not None:
+                return cached_data
 
-            endpoint = "/stat/report/hourly.sta"
-            payload = {
-                "attrs": ["rx_bytes", "tx_bytes", "bytes"],
-                "mac": client_mac,
-                "start": start_time,
-                "end": end_time,
-            }
-            api_request = ApiRequest(method="post", path=endpoint, data=payload)
-            response = await self._connection.request(api_request)
-            result = response if isinstance(response, list) else []
-            self._connection._update_cache(cache_key, result, timeout=300)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting stats for client {client_mac}: {e}")
-            return []
+            if not await self._connection.ensure_connected():
+                return []
 
-    async def get_device_stats(self, device_mac: str, duration_hours: int = 1) -> List[Dict[str, Any]]:
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
+                end_time = int(datetime.now().timestamp() * 1000)
+
+                endpoint = "/stat/report/hourly.sta"
+                payload = {
+                    "attrs": ["rx_bytes", "tx_bytes", "bytes"],
+                    "mac": client_mac,
+                    "start": start_time,
+                    "end": end_time,
+                }
+                api_request = ApiRequest(method="post", path=endpoint, data=payload)
+                response = await self._connection.request(api_request)
+                result = response if isinstance(response, list) else []
+                self._connection._update_cache(cache_key, result, timeout=300)
+                return result
+            except Exception as e:
+                logger.error(f"Error getting stats for client {client_mac} (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_device_stats(self, device_mac: str, duration_hours: int = 1, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get statistics for a specific device."""
-        cache_key = f"{CACHE_PREFIX_STATS_DEVICE}_{device_mac}_{duration_hours}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_STATS_DEVICE}_{device_mac}_{duration_hours}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
-            end_time = int(datetime.now().timestamp() * 1000)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key, timeout=300)  # 5 minute cache
+            if cached_data is not None:
+                return cached_data
 
-            endpoint = "/stat/report/hourly.dev"
-            payload = {
-                "attrs": [
-                    "rx_bytes",
-                    "tx_bytes",
-                    "bytes",
-                    "num_sta",
-                ],  # num_sta relevant for APs
-                "mac": device_mac,
-                "start": start_time,
-                "end": end_time,
-            }
-            api_request = ApiRequest(method="post", path=endpoint, data=payload)
-            response = await self._connection.request(api_request)
-            result = response if isinstance(response, list) else []
-            self._connection._update_cache(cache_key, result, timeout=300)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting stats for device {device_mac}: {e}")
-            return []
+            if not await self._connection.ensure_connected():
+                return []
 
-    async def get_top_clients(self, duration_hours: int = 24, limit: int = 10) -> List[Dict[str, Any]]:
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                start_time = int((datetime.now() - timedelta(hours=duration_hours)).timestamp() * 1000)
+                end_time = int(datetime.now().timestamp() * 1000)
+
+                endpoint = "/stat/report/hourly.dev"
+                payload = {
+                    "attrs": [
+                        "rx_bytes",
+                        "tx_bytes",
+                        "bytes",
+                        "num_sta",
+                    ],  # num_sta relevant for APs
+                    "mac": device_mac,
+                    "start": start_time,
+                    "end": end_time,
+                }
+                api_request = ApiRequest(method="post", path=endpoint, data=payload)
+                response = await self._connection.request(api_request)
+                result = response if isinstance(response, list) else []
+                self._connection._update_cache(cache_key, result, timeout=300)
+                return result
+            except Exception as e:
+                logger.error(f"Error getting stats for device {device_mac} (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_top_clients(self, duration_hours: int = 24, limit: int = 10, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get top clients by usage.
 
         Fallback approach: derive usage from current client objects when report
         endpoints return no data. Values are cumulative since association and
         are sufficient for ranking purposes.
         """
-        online_clients = await self._client_manager.get_clients()
+        online_clients = await self._client_manager.get_clients(site=site)
         if not online_clients:
             return []
 
@@ -181,48 +225,68 @@ class StatsManager:
         sorted_clients = sorted(aggregated_stats, key=lambda x: x["total_bytes"], reverse=True)
         return sorted_clients[:limit]
 
-    async def get_dpi_stats(
-        self,
-    ) -> Dict[str, List[Any]]:  # Return List[DPIRestrictionApp/Group]
+    async def get_dpi_stats(self, site: Optional[str] = None) -> Dict[str, List[Any]]:  # Return List[DPIRestrictionApp/Group]
         """Get Deep Packet Inspection (DPI) statistics."""
-        cache_key = f"{CACHE_PREFIX_STATS_DPI}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key, timeout=900)  # 15 minute cache
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_STATS_DPI}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        if not await self._connection.ensure_connected() or not self._connection.controller:
-            return {"applications": [], "categories": []}
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key, timeout=900)  # 15 minute cache
+            if cached_data is not None:
+                return cached_data
 
-        try:
-            await self._connection.controller.dpi_apps.update()
-            await self._connection.controller.dpi_groups.update()
+            if not await self._connection.ensure_connected() or not self._connection.controller:
+                return {"applications": [], "categories": []}
 
-            dpi_apps: List[DPIRestrictionApp] = list(self._connection.controller.dpi_apps.values())
-            dpi_groups: List[DPIRestrictionGroup] = list(self._connection.controller.dpi_groups.values())
-            result = {"applications": dpi_apps, "categories": dpi_groups}
-            self._connection._update_cache(cache_key, result, timeout=900)
-            return result
-        except Exception as e:
-            logger.error(f"Error getting DPI stats: {e}")
-            return {"applications": [], "categories": []}
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-    async def get_alerts(self, include_archived: bool = False) -> List[Event]:  # Changed return type
+                await self._connection.controller.dpi_apps.update()
+                await self._connection.controller.dpi_groups.update()
+
+                dpi_apps: List[DPIRestrictionApp] = list(self._connection.controller.dpi_apps.values())
+                dpi_groups: List[DPIRestrictionGroup] = list(self._connection.controller.dpi_groups.values())
+                result = {"applications": dpi_apps, "categories": dpi_groups}
+                self._connection._update_cache(cache_key, result, timeout=900)
+                return result
+            except Exception as e:
+                logger.error(f"Error getting DPI stats (site={target_site}): {e}", exc_info=True)
+                return {"applications": [], "categories": []}
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_alerts(self, include_archived: bool = False, site: Optional[str] = None) -> List[Event]:  # Changed return type
         """Get alerts from the controller."""
-        cache_key = f"{CACHE_PREFIX_STATS_ALERTS}_{include_archived}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key, timeout=60)  # 1 minute cache
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_STATS_ALERTS}_{include_archived}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        if not await self._connection.ensure_connected() or not self._connection.controller:
-            return []
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key, timeout=60)  # 1 minute cache
+            if cached_data is not None:
+                return cached_data
 
-        try:
-            await self._connection.controller.alerts.update()
-            alerts: List[Event] = list(self._connection.controller.alerts.values())
-            if not include_archived:
-                alerts = [a for a in alerts if not a.raw.get("archived", False)]
-            self._connection._update_cache(cache_key, alerts, timeout=60)
-            return alerts
-        except Exception as e:
-            logger.error(f"Error getting alerts: {e}")
-            return []
+            if not await self._connection.ensure_connected() or not self._connection.controller:
+                return []
+
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                await self._connection.controller.alerts.update()
+                alerts: List[Event] = list(self._connection.controller.alerts.values())
+                if not include_archived:
+                    alerts = [a for a in alerts if not a.raw.get("archived", False)]
+                self._connection._update_cache(cache_key, alerts, timeout=60)
+                return alerts
+            except Exception as e:
+                logger.error(f"Error getting alerts (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)

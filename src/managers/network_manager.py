@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -22,52 +23,61 @@ class NetworkManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_networks(self) -> List[Dict[str, Any]]:
-        """Get list of networks (LAN/VLAN) for the current site."""
-        cache_key = f"{CACHE_PREFIX_NETWORKS}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
-
+    async def _with_site(self, target_site: str, coro):
+        original_site = self._connection.site
         try:
-            # Revert back to V1 API endpoint for listing networks
-            logger.debug("Fetching networks using V1 endpoint /rest/networkconf")
-            api_request = ApiRequest(method="get", path="/rest/networkconf")
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            return await coro()
+        finally:
+            if target_site != original_site:
+                await self._connection.set_site(original_site)
 
-            # Call the request method
-            response = await self._connection.request(api_request)
+    async def get_networks(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of networks (LAN/VLAN) for the target site."""
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_NETWORKS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-            # V1 response is typically a list within a 'data' key, but aiounifi might unpack it
-            # Check common patterns
-            networks_data = []
-            if isinstance(response, dict) and "data" in response and isinstance(response["data"], list):
-                networks_data = response["data"]
-            elif isinstance(response, list):  # aiounifi might return the list directly
-                networks_data = response
-            else:
-                logger.error(
-                    f"Unexpected response format from /rest/networkconf: {type(response)}. Response: {response}"
-                )
-                # Don't cache potentially invalid data
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
+
+            async def fetch():
+                # Revert back to V1 API endpoint for listing networks
+                logger.debug(f"Fetching networks using V1 endpoint /rest/networkconf (site={target_site})")
+                api_request = ApiRequest(method="get", path="/rest/networkconf")
+                response = await self._connection.request(api_request)
+
+                networks_data = []
+                if isinstance(response, dict) and "data" in response and isinstance(response["data"], list):
+                    networks_data = response["data"]
+                elif isinstance(response, list):
+                    networks_data = response
+                else:
+                    logger.error(
+                        f"Unexpected response format from /rest/networkconf: {type(response)}. Response: {response}"
+                    )
+                    return []
+
+                if not isinstance(networks_data, list) or not all(isinstance(item, dict) for item in networks_data):
+                    logger.error(
+                        f"Unexpected data structure in network list: {type(networks_data)}. Expected list of dicts. Data: {networks_data}"
+                    )
+                    return []
+
+                return networks_data
+
+            try:
+                networks = await self._with_site(target_site, fetch)
+                self._connection._update_cache(cache_key, networks)
+                return networks
+            except Exception as e:
+                logger.error(f"Error getting networks via V1 /rest/networkconf (site={target_site}): {e}", exc_info=True)
                 return []
-
-            # Basic check to ensure we got a list of dicts
-            if not isinstance(networks_data, list) or not all(isinstance(item, dict) for item in networks_data):
-                logger.error(
-                    f"Unexpected data structure in network list: {type(networks_data)}. Expected list of dicts. Data: {networks_data}"
-                )
-                return []
-
-            # Return the list of network dictionaries
-            networks = networks_data
-
-            self._connection._update_cache(cache_key, networks)
-            return networks
-        except Exception as e:
-            # Log original error for V1 endpoint failure
-            logger.error(f"Error getting networks via V1 /rest/networkconf: {e}", exc_info=True)
-            return []
 
     async def get_network_details(self, network_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific network."""
@@ -175,23 +185,30 @@ class NetworkManager:
             logger.error(f"Error deleting network {network_id}: {e}")
             return False
 
-    async def get_wlans(self) -> List[Wlan]:
-        """Get list of wireless networks (WLANs) for the current site."""
-        cache_key = f"{CACHE_PREFIX_WLANS}_{self._connection.site}"
-        cached_data: Optional[List[Wlan]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+    async def get_wlans(self, site: Optional[str] = None) -> List[Wlan]:
+        """Get list of wireless networks (WLANs) for the target site."""
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_WLANS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequest(method="get", path="/rest/wlanconf")
-            response = await self._connection.request(api_request)
-            wlans_data = response if isinstance(response, list) else []
-            wlans: List[Wlan] = [Wlan(raw_wlan) for raw_wlan in wlans_data]
-            self._connection._update_cache(cache_key, wlans)
-            return wlans
-        except Exception as e:
-            logger.error(f"Error getting WLANs: {e}")
-            return []
+        async with lock:
+            cached_data: Optional[List[Wlan]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
+
+            async def fetch():
+                api_request = ApiRequest(method="get", path="/rest/wlanconf")
+                response = await self._connection.request(api_request)
+                wlans_data = response if isinstance(response, list) else []
+                return [Wlan(raw_wlan) for raw_wlan in wlans_data]
+
+            try:
+                wlans = await self._with_site(target_site, fetch)
+                self._connection._update_cache(cache_key, wlans)
+                return wlans
+            except Exception as e:
+                logger.error(f"Error getting WLANs (site={target_site}): {e}")
+                return []
 
     async def get_wlan_details(self, wlan_id: str) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific wireless network as a dictionary."""

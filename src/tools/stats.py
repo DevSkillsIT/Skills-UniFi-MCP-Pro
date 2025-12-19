@@ -1,221 +1,270 @@
 """
 Unifi Network MCP statistics tools.
 
-This module provides MCP tools to fetch statistics from a Unifi Network Controller.
+This module provides MCP tools to interact with a Unifi Network Controller's statistics functions,
+including retrieving system metrics, device statistics, and performance data.
+Supports multi-site operations with optional site parameter.
 """
 
 import logging
-from typing import Any, Dict
+import os
+from typing import Any, Dict, Optional, List
 
-from src.runtime import client_manager, server, stats_manager, system_manager
+from src.runtime import config, stats_manager, server, system_manager
+from src.utils.permissions import parse_permission
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
-    name="unifi_get_network_stats",
-    description="Get network statistics from the Unifi Network controller",
+    name="unifi_get_system_stats",
+    description="Get system statistics for the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def get_network_stats(duration: str = "hourly") -> Dict[str, Any]:
-    """Implementation for getting network stats."""
+async def get_system_stats(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting system statistics with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with system statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        duration_hours = {"hourly": 1, "daily": 24, "weekly": 168, "monthly": 720}.get(duration, 1)
-        stats = await stats_manager.get_network_stats(duration_hours=duration_hours)
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        def _first_non_none(*values):
-            for v in values:
-                if v is not None:
-                    return v
-            return 0
+        stats = await stats_manager.get_system_stats(site=site_slug)
 
-        summary = {
-            "total_rx_bytes": sum(int(e.get("rx_bytes", 0) or 0) for e in stats),
-            "total_tx_bytes": sum(int(e.get("tx_bytes", 0) or 0) for e in stats),
-            "total_bytes": sum(
-                int(
-                    (
-                        e.get("bytes")
-                        if e.get("bytes") is not None
-                        else (e.get("rx_bytes", 0) or 0) + (e.get("tx_bytes", 0) or 0)
-                    )
-                )
-                for e in stats
-            ),
-            "avg_clients": int(
-                sum(_first_non_none(e.get("num_user"), e.get("num_active_user"), e.get("num_sta")) for e in stats)
-                / max(1, len(stats))
-            )
-            if stats
-            else 0,
-        }
-        return {
+        # Convert Stats objects to plain dictionaries
+        stats_raw = stats.raw if hasattr(stats, "raw") else stats
+
+        return inject_site_metadata({
             "success": True,
-            "site": stats_manager._connection.site,
-            "duration": duration,
-            "summary": summary,
-            "stats": stats,
-        }
+            "system_stats": stats_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting network stats: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_get_client_stats",
-    description="Get statistics for a specific client/device",
-)
-async def get_client_stats(client_id: str, duration: str = "hourly") -> Dict[str, Any]:
-    """Implementation for getting client stats."""
-    try:
-        duration_hours = {"hourly": 1, "daily": 24, "weekly": 168, "monthly": 720}.get(duration, 1)
-        client_details = await client_manager.get_client_details(client_id)
-        if not client_details:
-            return {"success": False, "error": f"Client '{client_id}' not found"}
-
-        # Support aiounifi Client objects as well as dicts
-        client_raw = client_details.raw if hasattr(client_details, "raw") else client_details
-        client_mac = client_raw.get("mac", client_id)
-        client_name = client_raw.get("name") or client_raw.get("hostname") or client_mac
-
-        # Stats endpoint expects MAC, not _id
-        stats = await stats_manager.get_client_stats(client_mac, duration_hours=duration_hours)
-        summary = {
-            "total_rx_bytes": sum(e.get("rx_bytes", 0) for e in stats),
-            "total_tx_bytes": sum(e.get("tx_bytes", 0) for e in stats),
-            "total_bytes": sum(e.get("bytes", e.get("rx_bytes", 0) + e.get("tx_bytes", 0)) for e in stats),
-        }
-        return {
-            "success": True,
-            "site": stats_manager._connection.site,
-            "client_id": client_id,
-            "client_name": client_name,
-            "duration": duration,
-            "summary": summary,
-            "stats": stats,
-        }
-    except Exception as e:
-        logger.error(f"Error getting client stats for {client_id}: {e}", exc_info=True)
+        logger.error(f"Error getting system statistics: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
     name="unifi_get_device_stats",
-    description="Get statistics for a specific device (access point, switch, etc.)",
+    description="Get statistics for a specific device by ID. Supports multi-site with optional site parameter.",
 )
-async def get_device_stats(device_id: str, duration: str = "hourly") -> Dict[str, Any]:
-    """Implementation for getting device stats."""
+async def get_device_stats(device_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting device statistics with multi-site support.
+
+    Args:
+        device_id: The _id of the device
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with device statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        duration_hours = {"hourly": 1, "daily": 24, "weekly": 168, "monthly": 720}.get(duration, 1)
-        device_details = await system_manager.get_device_details(device_id)
-        if not device_details:
-            return {"success": False, "error": f"Device '{device_id}' not found"}
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        device_name = device_details.get("name") or device_details.get("model", "Unknown")
-        actual_device_id = device_details.get("_id", device_id)
-        device_type = device_details.get("type", "unknown")
-
-        stats = await stats_manager.get_device_stats(actual_device_id, duration_hours=duration_hours)
-        summary = {
-            "total_rx_bytes": sum(e.get("rx_bytes", 0) for e in stats),
-            "total_tx_bytes": sum(e.get("tx_bytes", 0) for e in stats),
-            "total_bytes": sum(e.get("bytes", e.get("rx_bytes", 0) + e.get("tx_bytes", 0)) for e in stats),
-        }
-        if device_type == "uap" and stats:
-            summary["avg_clients"] = int(sum(e.get("num_sta", 0) for e in stats) / max(1, len(stats)))
-            summary["max_clients"] = max(e.get("num_sta", 0) for e in stats)
-
-        return {
-            "success": True,
-            "site": stats_manager._connection.site,
-            "device_id": device_id,
-            "device_name": device_name,
-            "device_type": device_type,
-            "duration": duration,
-            "summary": summary,
-            "stats": stats,
-        }
+        stats = await stats_manager.get_device_stats(device_id, site=site_slug)
+        if stats:
+            stats_raw = stats.raw if hasattr(stats, "raw") else stats
+            return inject_site_metadata({
+                "success": True,
+                "device_stats": stats_raw,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Device statistics for ID {device_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting device stats for {device_id}: {e}", exc_info=True)
+        logger.error(f"Error getting device statistics: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_get_top_clients",
-    description="Get a list of top clients by usage (sorted by total bytes)",
+    name="unifi_get_network_stats",
+    description="Get network statistics for all networks. Supports multi-site with optional site parameter.",
 )
-async def get_top_clients(duration: str = "daily", limit: int = 10) -> Dict[str, Any]:
-    """Implementation for getting top clients by usage."""
+async def get_network_stats(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting network statistics with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with network statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        duration_hours = {"hourly": 1, "daily": 24, "weekly": 168, "monthly": 720}.get(duration, 1)
-        top_client_stats = await stats_manager.get_top_clients(duration_hours=duration_hours, limit=limit)
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        enhanced_clients = []
-        for entry in top_client_stats:
-            mac = entry.get("mac")
-            name = "Unknown"
-            if mac:
-                details = await client_manager.get_client_details(mac)
-                if details:
-                    raw = details.raw if hasattr(details, "raw") else details
-                    name = raw.get("name") or raw.get("hostname") or mac
-            entry["name"] = name
-            enhanced_clients.append(entry)
+        stats = await stats_manager.get_network_stats(site=site_slug)
 
-        return {
+        # Convert NetworkStats objects to plain dictionaries
+        stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
+
+        return inject_site_metadata({
             "success": True,
-            "site": stats_manager._connection.site,
-            "duration": duration,
-            "limit": limit,
-            "top_clients": enhanced_clients,
-        }
+            "count": len(stats_raw),
+            "network_stats": stats_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting top clients: {e}", exc_info=True)
+        logger.error(f"Error getting network statistics: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_get_dpi_stats",
-    description="Get Deep Packet Inspection (DPI) statistics (applications and categories)",
+    name="unifi_get_client_stats",
+    description="Get client statistics for connected clients. Supports multi-site with optional site parameter.",
 )
-async def get_dpi_stats() -> Dict[str, Any]:
-    """Implementation for getting DPI stats."""
+async def get_client_stats(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting client statistics with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with client statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        dpi_stats_result = await stats_manager.get_dpi_stats()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        def serialize_dpi(item):
-            return item.raw if hasattr(item, "raw") else item
+        stats = await stats_manager.get_client_stats(site=site_slug)
 
-        serialized_apps = [serialize_dpi(app) for app in dpi_stats_result.get("applications", [])]
-        serialized_cats = [serialize_dpi(cat) for cat in dpi_stats_result.get("categories", [])]
+        # Convert ClientStats objects to plain dictionaries
+        stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
 
-        return {
+        return inject_site_metadata({
             "success": True,
-            "site": stats_manager._connection.site,
-            "dpi_stats": {
-                "applications": serialized_apps,
-                "categories": serialized_cats,
-            },
-        }
+            "count": len(stats_raw),
+            "client_stats": stats_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting DPI stats: {e}", exc_info=True)
+        logger.error(f"Error getting client statistics: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_get_alerts",
-    description="Get recent alerts from the Unifi Network controller",
+    name="unifi_get_ap_stats",
+    description="Get access point statistics for all APs. Supports multi-site with optional site parameter.",
 )
-async def get_alerts(limit: int = 10, include_archived: bool = False) -> Dict[str, Any]:
-    """Implementation for getting alerts."""
+async def get_ap_stats(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting AP statistics with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with AP statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        alerts = await stats_manager.get_alerts(limit=limit, include_archived=include_archived)
-        return {
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        stats = await stats_manager.get_ap_stats(site=site_slug)
+
+        # Convert APStats objects to plain dictionaries
+        stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
+
+        return inject_site_metadata({
             "success": True,
-            "site": stats_manager._connection.site,
-            "limit": limit,
-            "include_archived": include_archived,
-            "alerts": alerts,
-        }
+            "count": len(stats_raw),
+            "ap_stats": stats_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting alerts: {e}", exc_info=True)
+        logger.error(f"Error getting AP statistics: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
+    name="unifi_get_switch_stats",
+    description="Get switch statistics for all switches. Supports multi-site with optional site parameter.",
+)
+async def get_switch_stats(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting switch statistics with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with switch statistics and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        stats = await stats_manager.get_switch_stats(site=site_slug)
+
+        # Convert SwitchStats objects to plain dictionaries
+        stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
+
+        return inject_site_metadata({
+            "success": True,
+            "count": len(stats_raw),
+            "switch_stats": stats_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error getting switch statistics: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

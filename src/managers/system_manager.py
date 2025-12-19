@@ -26,6 +26,7 @@ class SystemManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._sites_lock = asyncio.Lock()
 
     async def get_system_info(self) -> Dict[str, Any]:
         """Get system information including version, uptime, etc."""
@@ -291,30 +292,95 @@ class SystemManager:
         cache_key = CACHE_PREFIX_SITES
         cached_data: Optional[List[Site]] = self._connection.get_cached(cache_key)
         if cached_data is not None:
+            print(f"🔍 [DEBUG] get_sites() returning {len(cached_data)} cached sites")
             return cached_data
 
         try:
+            print(f"🔍 [DEBUG] get_sites() making API call to /api/self/sites...")
+            print(f"🔍 [DEBUG] Connection status: {getattr(self._connection, 'is_connected', 'Unknown')}")
+            
             api_request = ApiRequest(method="get", path="/api/self/sites")
+            print(f"🔍 [DEBUG] API request: {api_request}")
+            
             response = await self._connection.request(api_request)
+            print(f"🔍 [DEBUG] Raw API response type: {type(response)}")
+            print(f"🔍 [DEBUG] Raw API response: {response}")
+            
             sites_data = response if isinstance(response, list) else []
+            print(f"🔍 [DEBUG] Processed sites_data: {sites_data}")
+            
             sites: List[Site] = [Site(raw_site) for raw_site in sites_data]
+            print(f"🔍 [DEBUG] Created {len(sites)} Site objects")
+            
             self._connection._update_cache(cache_key, sites)
             return sites
         except Exception as e:
-            logger.error(f"Error getting sites: {e}")
+            print(f"🔍 [DEBUG] Exception in get_sites(): {e}")
+            logger.error(f"Error getting sites: {e}", exc_info=True)
             return []
 
-    async def get_site_details(self, site_identifier: str) -> Optional[Site]:  # Changed return type
+    async def list_sites(self) -> List[Dict[str, Any]]:
+        """
+        Get a list of all sites in simple dict format for multi-site support.
+
+        Returns a list compatible with site resolver (Fase 1).
+        Uses cache with TTL of 5 minutes.
+
+        Returns:
+            List of dicts with keys: _id, name, desc
+        """
+        print("🔍 [DEBUG] list_sites() starting...")
+        
+        try:
+            # Use the actual site cache from connection_manager instead of API call
+            print("🔍 [DEBUG] Using connection_manager site cache instead of API...")
+            
+            if hasattr(self._connection, '_site_name_to_id'):
+                site_cache = self._connection._site_name_to_id
+                print(f"🔍 [DEBUG] Found site cache with {len(site_cache)} entries: {list(site_cache.keys())}")
+                
+                result = []
+                for site_id, site_name in site_cache.items():
+                    site_dict = {
+                        "_id": site_id,
+                        "name": site_name,
+                        "desc": site_name
+                    }
+                    result.append(site_dict)
+                
+                print(f"🔍 [DEBUG] Returning {len(result)} sites from cache")
+                return result
+            else:
+                print("🔍 [DEBUG] No site cache found, falling back to API call...")
+                # Fallback to original API method
+                sites = await self.get_sites()
+                result = []
+                for site in sites:
+                    site_dict = {
+                        "_id": site._id,
+                        "name": site.name,
+                        "desc": site.desc or site.name
+                    }
+                    result.append(site_dict)
+                return result
+            
+        except Exception as e:
+            print(f"🔍 [DEBUG] Error in list_sites: {e}")
+            logger.error(f"Error getting sites for multi-site resolver: {e}", exc_info=True)
+            return []
+
+    async def get_site_details(self, site_identifier: str, site: Optional[str] = None) -> Optional[Site]:  # Changed return type
         """Get detailed information for a specific site by ID, name, or description.
 
         Args:
             site_identifier: ID (_id), name, or description (desc) of the site.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Site object if found, None otherwise.
         """
-        sites = await self.get_sites()
-        site: Optional[Site] = next(
+        sites = await self.get_sites(site=site)
+        site_obj: Optional[Site] = next(
             (
                 s
                 for s in sites
@@ -325,203 +391,255 @@ class SystemManager:
             None,
         )
 
-        if not site:
+        if not site_obj:
             logger.warning(f"Site '{site_identifier}' not found.")
-        return site
+        return site_obj
 
-    async def get_current_site(self) -> Optional[Site]:  # Changed return type
+    async def get_current_site(self, site: Optional[str] = None) -> Optional[Site]:  # Changed return type
         """Get information about the currently configured site for the connection."""
-        return await self.get_site_details(self._connection.site)
+        target_site = site or self._connection.site
+        return await self.get_site_details(target_site, site=site)
 
-    async def create_site(self, name: str, description: Optional[str] = None) -> Optional[Site]:  # Changed return type
+    async def create_site(self, name: str, description: Optional[str] = None, site: Optional[str] = None) -> Optional[Site]:  # Changed return type
         """Create a new site.
 
         Args:
             name: Name for the new site (will be formatted: lowercase, underscores).
             description: Optional description for the site.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             The created site data if successful, None otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            formatted_name = name.lower().replace(" ", "_").replace("-", "_")
-            site_desc = description or name
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                formatted_name = name.lower().replace(" ", "_").replace("-", "_")
+                site_desc = description or name
 
-            sites = await self.get_sites()
-            if any(s.name == formatted_name for s in sites):
-                logger.error(f"Site with internal name '{formatted_name}' already exists")
-                return None
-            if any(s.description == site_desc for s in sites):
-                logger.warning(
-                    f"Site with description '{site_desc}' already exists, but proceeding with unique internal name."
-                )
+                sites = await self.get_sites(site=site)
+                if any(s.name == formatted_name for s in sites):
+                    logger.error(f"Site with internal name '{formatted_name}' already exists")
+                    return None
+                if any(s.description == site_desc for s in sites):
+                    logger.warning(
+                        f"Site with description '{site_desc}' already exists, but proceeding with unique internal name."
+                    )
 
-            payload = {"cmd": "add-site", "name": formatted_name, "desc": site_desc}
+                payload = {"cmd": "add-site", "name": formatted_name, "desc": site_desc}
 
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
 
-            self._connection._invalidate_cache(CACHE_PREFIX_SITES)
+                self._connection._invalidate_cache(CACHE_PREFIX_SITES)
 
-            if isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok":
-                logger.info(f"Site '{site_desc}' (internal: '{formatted_name}') created successfully.")
-                await asyncio.sleep(1.5)
-                new_site_details: Optional[Site] = await self.get_site_details(formatted_name)
-                if not new_site_details:
-                    logger.warning("Could not fetch details of newly created site immediately.")
-                return new_site_details
-            else:
-                logger.error(f"Error creating site: {response}")
-                return None
+                if isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok":
+                    logger.info(f"Site '{site_desc}' (internal: '{formatted_name}') created successfully.")
+                    await asyncio.sleep(1.5)
+                    new_site_details: Optional[Site] = await self.get_site_details(formatted_name, site=site)
+                    if not new_site_details:
+                        logger.warning("Could not fetch details of newly created site immediately.")
+                    return new_site_details
+                else:
+                    logger.error(f"Error creating site: {response}")
+                    return None
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error creating site '{name}': {e}")
+            logger.error(f"Error creating site '{name}': {e}", exc_info=True)
             return None
 
-    async def update_site(self, site_id: str, description: str) -> bool:
+    async def update_site(self, site_id: str, description: str, site: Optional[str] = None) -> bool:
         """Update a site's description.
         Note: Changing the internal 'name' of a site is usually not supported or advised.
 
         Args:
             site_id: _id of the site to update.
             description: New description for the site.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            site = await self.get_site_details(site_id)
-            if not site:
-                logger.warning(f"Site '{site_id}' not found.")
-                return False
-            site_internal_id = site.site_id
-            if not site_internal_id:
-                logger.error(f"Site found for '{site_id}' but has no _id property.")
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                site_obj = await self.get_site_details(site_id, site=site)
+                if not site_obj:
+                    logger.warning(f"Site '{site_id}' not found.")
+                    return False
+                site_internal_id = site_obj.site_id
+                if not site_internal_id:
+                    logger.error(f"Site found for '{site_id}' but has no _id property.")
+                    return False
 
-            payload = {
-                "cmd": "update-site",
-                "site": site_internal_id,
-                "desc": description,
-            }
+                payload = {
+                    "cmd": "update-site",
+                    "site": site_internal_id,
+                    "desc": description,
+                }
 
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
 
-            self._connection._invalidate_cache(CACHE_PREFIX_SITES)
+                self._connection._invalidate_cache(CACHE_PREFIX_SITES)
 
-            success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
-            if success:
-                logger.info(f"Site {site_id} description updated successfully.")
-            else:
-                logger.error(f"Error updating site {site_id}: {response}")
+                success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
+                if success:
+                    logger.info(f"Site {site_id} description updated successfully.")
+                else:
+                    logger.error(f"Error updating site {site_id}: {response}")
 
-            return success
+                return success
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error updating site {site_id}: {e}")
+            logger.error(f"Error updating site {site_id}: {e}", exc_info=True)
             return False
 
-    async def delete_site(self, site_id: str) -> bool:
+    async def delete_site(self, site_id: str, site: Optional[str] = None) -> bool:
         """Delete a site.
 
         Args:
             site_id: _id of the site to delete.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            site = await self.get_site_details(site_id)
-            if not site:
-                return False
-            site_internal_id = site.site_id
-            if not site_internal_id:
-                logger.error(f"Site found for '{site_id}' but has no _id property.")
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                site_obj = await self.get_site_details(site_id, site=site)
+                if not site_obj:
+                    return False
+                site_internal_id = site_obj.site_id
+                if not site_internal_id:
+                    logger.error(f"Site found for '{site_id}' but has no _id property.")
+                    return False
 
-            # Don't allow deleting the default site
-            if site.name == "default":
-                logger.error("Cannot delete the default site.")
-                return False
+                # Don't allow deleting the default site
+                if site_obj.name == "default":
+                    logger.error("Cannot delete the default site.")
+                    return False
 
-            payload = {
-                "cmd": "delete-site",
-                "site": site_internal_id,  # API requires _id
-            }
+                payload = {
+                    "cmd": "delete-site",
+                    "site": site_internal_id,  # API requires _id
+                }
 
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
 
-            self._connection._invalidate_cache(CACHE_PREFIX_SITES)
+                self._connection._invalidate_cache(CACHE_PREFIX_SITES)
 
-            success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
-            if success:
-                logger.info(f"Site {site_id} deleted successfully.")
-                # If deleting the current site, switch back to default?
-                if self._connection.site == site.name:
-                    logger.warning(
-                        f"Deleted the current site '{self._connection.site}'. Consider switching to another site (e.g., default)."
-                    )
-                    # Optionally switch automatically: await self.switch_site("default")
-            else:
-                logger.error(f"Error deleting site {site_id}: {response}")
+                success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
+                if success:
+                    logger.info(f"Site {site_id} deleted successfully.")
+                    # If deleting the current site, switch back to default?
+                    if self._connection.site == site_obj.name:
+                        logger.warning(
+                            f"Deleted the current site '{self._connection.site}'. Consider switching to another site (e.g., default)."
+                        )
+                        # Optionally switch automatically: await self.switch_site("default")
+                else:
+                    logger.error(f"Error deleting site {site_id}: {response}")
 
-            return success
+                return success
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error deleting site {site_id}: {e}")
+            logger.error(f"Error deleting site {site_id}: {e}", exc_info=True)
             return False
 
-    async def switch_site(self, site_identifier: str) -> bool:
+    async def switch_site(self, site_identifier: str, site: Optional[str] = None) -> bool:
         """Switch the active site for the connection manager.
 
         Args:
             site_identifier: ID (_id), name, or description of the site to switch to.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if site switch was successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            site = await self.get_site_details(site_identifier)
-            if not site:
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                site_obj = await self.get_site_details(site_identifier, site=site)
+                if not site_obj:
+                    return False
 
-            site_name = site.name
-            if not site_name:
-                logger.error(f"Site identified by '{site_identifier}' has no internal name, cannot switch.")
-                return False
+                site_name = site_obj.name
+                if not site_name:
+                    logger.error(f"Site identified by '{site_identifier}' has no internal name, cannot switch.")
+                    return False
 
-            await self._connection.set_site(site_name)
-            return True
+                await self._connection.set_site(site_name)
+                return True
+            finally:
+                if target_site != original_site and target_site != site_name:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error switching to site '{site_identifier}': {e}")
+            logger.error(f"Error switching to site '{site_identifier}': {e}", exc_info=True)
             return False
 
-    async def get_admin_users(self) -> List[Dict[str, Any]]:
+    async def get_admin_users(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get a list of admin users for the controller."""
-        cache_key = CACHE_PREFIX_ADMINS
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_ADMINS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequest(method="get", path="/api/stat/admin")
-            response = await self._connection.request(api_request)
-            admins = response if isinstance(response, list) else []
-            self._connection._update_cache(cache_key, admins)
-            return admins
-        except Exception as e:
-            logger.error(f"Error getting admin users: {e}")
-            return []
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-    async def get_admin_user_details(self, user_identifier: str) -> Optional[Dict[str, Any]]:
+            if not await self._connection.ensure_connected():
+                return []
+
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                api_request = ApiRequest(method="get", path="/api/stat/admin")
+                response = await self._connection.request(api_request)
+                admins = response if isinstance(response, list) else []
+                self._connection._update_cache(cache_key, admins)
+                return admins
+            except Exception as e:
+                logger.error(f"Error getting admin users (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_admin_user_details(self, user_identifier: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific admin user by ID or name.
 
         Args:
             user_identifier: ID (_id) or name of the admin user.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Admin user dictionary if found, None otherwise.
         """
-        admin_users = await self.get_admin_users()
+        admin_users = await self.get_admin_users(site=site)
         user = next(
             (u for u in admin_users if u.get("_id") == user_identifier or u.get("name") == user_identifier),
             None,
@@ -537,6 +655,7 @@ class SystemManager:
         email: Optional[str] = None,
         is_super: bool = False,
         site_access: Optional[List[str]] = None,
+        site: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Create a new admin user.
 
@@ -546,52 +665,61 @@ class SystemManager:
             email: Optional email for the admin.
             is_super: Whether the user is a super admin.
             site_access: List of site _ids the user has access to (if not super admin).
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             The created admin user data if successful, None otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            admin_users = await self.get_admin_users()
-            if any(u.get("name") == name for u in admin_users):
-                logger.error(f"Admin user with name '{name}' already exists")
-                return None
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                admin_users = await self.get_admin_users(site=site)
+                if any(u.get("name") == name for u in admin_users):
+                    logger.error(f"Admin user with name '{name}' already exists")
+                    return None
 
-            payload = {
-                "cmd": "create-admin",
-                "name": name,
-                "x_password": password,
-                "email": email or "",
-                "is_super": is_super,
-            }
+                payload = {
+                    "cmd": "create-admin",
+                    "name": name,
+                    "x_password": password,
+                    "email": email or "",
+                    "is_super": is_super,
+                }
 
-            if not is_super and site_access is not None:
-                payload["site_access"] = site_access
-            elif not is_super:
-                logger.warning(
-                    f"Creating non-super admin '{name}' without site_access. They may have no site access initially."
-                )
+                if not is_super and site_access is not None:
+                    payload["site_access"] = site_access
+                elif not is_super:
+                    logger.warning(
+                        f"Creating non-super admin '{name}' without site_access. They may have no site access initially."
+                    )
 
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
 
-            self._connection._invalidate_cache(CACHE_PREFIX_ADMINS)
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_ADMINS}_{target_site}")
 
-            if isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok":
-                logger.info(f"Admin user '{name}' created successfully.")
-                self._connection._invalidate_cache(CACHE_PREFIX_ADMINS)
-                created_user_data = None
-                if "data" in response and isinstance(response["data"], list) and len(response["data"]) > 0:
-                    created_user_data = response["data"][0]
-                if created_user_data:
-                    return created_user_data  # Return the dict
+                if isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok":
+                    logger.info(f"Admin user '{name}' created successfully.")
+                    self._connection._invalidate_cache(f"{CACHE_PREFIX_ADMINS}_{target_site}")
+                    created_user_data = None
+                    if "data" in response and isinstance(response["data"], list) and len(response["data"]) > 0:
+                        created_user_data = response["data"][0]
+                    if created_user_data:
+                        return created_user_data  # Return the dict
 
-                logger.warning("Admin user creation reported success, but could not extract details.")
-                return {"success": True}  # Return simple success dict
-            else:
-                logger.error(f"Error creating admin user '{name}': {response}")
-                return None
+                    logger.warning("Admin user creation reported success, but could not extract details.")
+                    return {"success": True}  # Return simple success dict
+                else:
+                    logger.error(f"Error creating admin user '{name}': {response}")
+                    return None
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error creating admin user '{name}': {e}")
+            logger.error(f"Error creating admin user '{name}': {e}", exc_info=True)
             return None
 
     async def update_admin_user(
@@ -602,6 +730,7 @@ class SystemManager:
         email: Optional[str] = None,
         is_super: Optional[bool] = None,
         site_access: Optional[List[str]] = None,
+        site: Optional[str] = None,
     ) -> bool:
         """Update an admin user.
 
@@ -612,96 +741,115 @@ class SystemManager:
             email: New email.
             is_super: New super admin status.
             site_access: New list of site _ids the user has access to.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            user = await self.get_admin_user_details(user_id)
-            if not user:
-                return False
-            admin_internal_id = user.get("_id")
-            if not admin_internal_id:
-                logger.error(f"Admin user found for '{user_id}' but has no _id.")
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                user = await self.get_admin_user_details(user_id, site=site)
+                if not user:
+                    return False
+                admin_internal_id = user.get("_id")
+                if not admin_internal_id:
+                    logger.error(f"Admin user found for '{user_id}' but has no _id.")
+                    return False
 
-            payload = {"cmd": "update-admin", "admin_id": admin_internal_id}
-            if name is not None:
-                if name != user.get("name"):
-                    admins = await self.get_admin_users()
-                    if any(u.get("name") == name and u.get("_id") != admin_internal_id for u in admins):
-                        logger.error(f"Cannot rename admin: Username '{name}' already exists.")
-                        return False
-                payload["name"] = name
-            if password is not None:
-                payload["x_password"] = password
-            if email is not None:
-                payload["email"] = email
-            if is_super is not None:
-                payload["is_super"] = is_super
-            if site_access is not None:
-                current_is_super = user.get("is_super", False) if is_super is None else is_super
-                if not current_is_super:
-                    payload["site_access"] = site_access
+                payload = {"cmd": "update-admin", "admin_id": admin_internal_id}
+                if name is not None:
+                    if name != user.get("name"):
+                        admins = await self.get_admin_users(site=site)
+                        if any(u.get("name") == name and u.get("_id") != admin_internal_id for u in admins):
+                            logger.error(f"Cannot rename admin: Username '{name}' already exists.")
+                            return False
+                    payload["name"] = name
+                if password is not None:
+                    payload["x_password"] = password
+                if email is not None:
+                    payload["email"] = email
+                if is_super is not None:
+                    payload["is_super"] = is_super
+                if site_access is not None:
+                    current_is_super = user.get("is_super", False) if is_super is None else is_super
+                    if not current_is_super:
+                        payload["site_access"] = site_access
+                    else:
+                        logger.info("Ignoring site_access update for super admin.")
+
+                if len(payload) <= 2:  # Only cmd and admin_id
+                    logger.warning(f"No fields provided to update for admin user {user_id}")
+                    return False
+
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
+
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_ADMINS}_{target_site}")
+
+                success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
+                if success:
+                    logger.info(f"Admin user {user_id} updated successfully.")
+                    self._connection._invalidate_cache(f"{CACHE_PREFIX_ADMINS}_{target_site}")
+                    return True
                 else:
-                    logger.info("Ignoring site_access update for super admin.")
-
-            if len(payload) <= 2:  # Only cmd and admin_id
-                logger.warning(f"No fields provided to update for admin user {user_id}")
-                return False
-
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
-
-            self._connection._invalidate_cache(CACHE_PREFIX_ADMINS)
-
-            success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
-            if success:
-                logger.info(f"Admin user {user_id} updated successfully.")
-                self._connection._invalidate_cache(CACHE_PREFIX_ADMINS)
-                return True
-            else:
-                logger.error(f"Error updating admin user {user_id}: {response}")
-                return False
+                    logger.error(f"Error updating admin user {user_id}: {response}")
+                    return False
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error updating admin user {user_id}: {e}")
+            logger.error(f"Error updating admin user {user_id}: {e}", exc_info=True)
             return False
 
-    async def delete_admin_user(self, user_id: str) -> bool:
+    async def delete_admin_user(self, user_id: str, site: Optional[str] = None) -> bool:
         """Delete an admin user.
 
         Args:
             user_id: _id of the admin user to delete.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            user = await self.get_admin_user_details(user_id)
-            if not user:
-                return False
-            admin_internal_id = user.get("_id")
-            if not admin_internal_id:
-                logger.error(f"Admin user found for '{user_id}' but has no _id.")
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                user = await self.get_admin_user_details(user_id, site=site)
+                if not user:
+                    return False
+                admin_internal_id = user.get("_id")
+                if not admin_internal_id:
+                    logger.error(f"Admin user found for '{user_id}' but has no _id.")
+                    return False
 
-            if user.get("name") == self._connection.username:
-                logger.error("Cannot delete the currently configured admin user for this connection.")
-                return False
+                if user.get("name") == self._connection.username:
+                    logger.error("Cannot delete the currently configured admin user for this connection.")
+                    return False
 
-            api_request = ApiRequest(method="delete", path=f"/api/stat/admin/{user_id}")
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="delete", path=f"/api/stat/admin/{user_id}")
+                response = await self._connection.request(api_request)
 
-            success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
-            if success:
-                logger.info(f"Admin user {user_id} deleted successfully.")
-                self._connection._invalidate_cache(CACHE_PREFIX_ADMINS)
-                return True
-            else:
-                logger.error(f"Error deleting admin user {user_id}: {response}")
-                return False
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_ADMINS}_{target_site}")
+
+                success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
+                if success:
+                    logger.info(f"Admin user {user_id} deleted successfully.")
+                    return True
+                else:
+                    logger.error(f"Error deleting admin user {user_id}: {response}")
+                    return False
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error deleting admin user {user_id}: {e}")
+            logger.error(f"Error deleting admin user {user_id}: {e}", exc_info=True)
             return False
 
     async def invite_admin_user(
@@ -709,6 +857,7 @@ class SystemManager:
         email: str,
         is_super: bool = False,
         site_access: Optional[List[str]] = None,
+        site: Optional[str] = None,
     ) -> bool:
         """Send an invite to a new admin user.
 
@@ -716,33 +865,42 @@ class SystemManager:
             email: Email address to send the invite to.
             is_super: Whether the invited user should be a super admin.
             site_access: List of site _ids the user will have access to.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            payload = {
-                "cmd": "invite-admin",
-                "email": email,
-                "for_super": is_super,
-            }
-            if site_access:
-                logger.warning("Site access payload structure for invite is assumed, verify API requirements.")
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                payload = {
+                    "cmd": "invite-admin",
+                    "email": email,
+                    "for_super": is_super,
+                }
+                if site_access:
+                    logger.warning("Site access payload structure for invite is assumed, verify API requirements.")
 
-            api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
-            response = await self._connection.request(api_request)
+                api_request = ApiRequest(method="post", path="/cmd/sitemgr", data=payload)
+                response = await self._connection.request(api_request)
 
-            success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
-            if success:
-                logger.info(f"Admin invitation sent successfully to {email}.")
-                return True
-            else:
-                logger.error(f"Error sending admin invitation to {email}: {response}")
-                return False
+                success = isinstance(response, dict) and response.get("meta", {}).get("rc") == "ok"
+                if success:
+                    logger.info(f"Admin invitation sent successfully to {email}.")
+                    return True
+                else:
+                    logger.error(f"Error sending admin invitation to {email}: {response}")
+                    return False
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
-            logger.error(f"Error inviting admin user {email}: {e}")
+            logger.error(f"Error inviting admin user {email}: {e}", exc_info=True)
             return False
 
-    async def get_current_admin_user(self) -> Optional[Dict[str, Any]]:  # Keep as Dict
+    async def get_current_admin_user(self, site: Optional[str] = None) -> Optional[Dict[str, Any]]:  # Keep as Dict
         """Get information about the currently logged in admin user (based on connection username)."""
-        return await self.get_admin_user_details(self._connection.username)
+        return await self.get_admin_user_details(self._connection.username, site=site)

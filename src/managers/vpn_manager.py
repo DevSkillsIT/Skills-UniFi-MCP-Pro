@@ -8,6 +8,7 @@ Note: UniFi is developing a dedicated VPN API but it's not yet complete.
 This implementation uses the networkconf endpoint which is the reliable approach.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -80,139 +81,172 @@ class VpnManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def _get_all_network_configs(self) -> List[Dict[str, Any]]:
+    async def _get_all_network_configs(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all network configurations from the controller.
+
+        Args:
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of network configuration dictionaries
         """
-        cache_key = f"{CACHE_PREFIX_NETWORKS}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_NETWORKS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequest(method="get", path="/rest/networkconf")
-            response = await self._connection.request(api_request)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-            # Handle various response formats
-            if isinstance(response, dict) and "data" in response:
-                networks = response["data"]
-            elif isinstance(response, list):
-                networks = response
-            else:
-                logger.warning(f"Unexpected networkconf response format: {type(response)}")
-                networks = []
+            if not await self._connection.ensure_connected():
+                return []
 
-            self._connection._update_cache(cache_key, networks)
-            return networks
-        except Exception as e:
-            logger.error(f"Error fetching network configurations: {e}")
-            return []
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-    async def get_vpn_configs(self, include_clients: bool = True, include_servers: bool = True) -> List[Dict[str, Any]]:
+                api_request = ApiRequest(method="get", path="/rest/networkconf")
+                response = await self._connection.request(api_request)
+
+                # Handle various response formats
+                if isinstance(response, dict) and "data" in response:
+                    networks = response["data"]
+                elif isinstance(response, list):
+                    networks = response
+                else:
+                    logger.warning(f"Unexpected networkconf response format: {type(response)}")
+                    networks = []
+
+                self._connection._update_cache(cache_key, networks)
+                return networks
+            except Exception as e:
+                logger.error(f"Error fetching network configurations (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_vpn_configs(self, include_clients: bool = True, include_servers: bool = True, site: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get VPN configurations from the controller.
 
         Args:
             include_clients: Whether to include VPN client configurations
             include_servers: Whether to include VPN server configurations
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of VPN configuration dictionaries
         """
-        cache_key = f"{CACHE_PREFIX_VPN_CONFIGS}_{self._connection.site}_{include_clients}_{include_servers}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_VPN_CONFIGS}_{target_site}_{include_clients}_{include_servers}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            networks = await self._get_all_network_configs()
-            vpn_configs = []
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-            for network in networks:
-                if not is_vpn_network(network):
-                    continue
+            try:
+                networks = await self._get_all_network_configs(site=site)
+                vpn_configs = []
 
-                purpose = network.get("purpose", "")
-                vpn_type = network.get("vpn_type", "")
-                is_client, is_server = classify_vpn_type(purpose, vpn_type)
+                for network in networks:
+                    if not is_vpn_network(network):
+                        continue
 
-                if (include_clients and is_client) or (include_servers and is_server):
-                    vpn_configs.append(network)
-                    logger.debug(
-                        f"Found VPN config: {network.get('name', 'unnamed')} "
-                        f"(purpose={purpose}, vpn_type={vpn_type}, "
-                        f"client={is_client}, server={is_server})"
-                    )
+                    purpose = network.get("purpose", "")
+                    vpn_type = network.get("vpn_type", "")
+                    is_client, is_server = classify_vpn_type(purpose, vpn_type)
 
-            logger.debug(f"Found {len(vpn_configs)} VPN configurations")
-            self._connection._update_cache(cache_key, vpn_configs)
-            return vpn_configs
+                    if (include_clients and is_client) or (include_servers and is_server):
+                        vpn_configs.append(network)
+                        logger.debug(
+                            f"Found VPN config: {network.get('name', 'unnamed')} "
+                            f"(purpose={purpose}, vpn_type={vpn_type}, "
+                            f"client={is_client}, server={is_server})"
+                        )
 
-        except Exception as e:
-            logger.error(f"Error getting VPN configurations: {e}")
-            return []
+                logger.debug(f"Found {len(vpn_configs)} VPN configurations")
+                self._connection._update_cache(cache_key, vpn_configs)
+                return vpn_configs
 
-    async def get_vpn_clients(self) -> List[Dict[str, Any]]:
-        """Get list of VPN client configurations for the current site.
+            except Exception as e:
+                logger.error(f"Error getting VPN configurations (site={target_site}): {e}", exc_info=True)
+                return []
+
+    async def get_vpn_clients(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of VPN client configurations for the specified site.
+
+        Args:
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of VPN client configuration dictionaries
         """
-        return await self.get_vpn_configs(include_clients=True, include_servers=False)
+        return await self.get_vpn_configs(include_clients=True, include_servers=False, site=site)
 
-    async def get_vpn_servers(self) -> List[Dict[str, Any]]:
-        """Get list of VPN server configurations for the current site.
+    async def get_vpn_servers(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get list of VPN server configurations for the specified site.
+
+        Args:
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of VPN server configuration dictionaries
         """
-        return await self.get_vpn_configs(include_clients=False, include_servers=True)
+        return await self.get_vpn_configs(include_clients=False, include_servers=True, site=site)
 
-    async def get_vpn_client_details(self, client_id: str) -> Optional[Dict[str, Any]]:
+    async def get_vpn_client_details(self, client_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific VPN client.
 
         Args:
             client_id: ID of the VPN client to get details for
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             VPN client details if found, None otherwise
         """
-        vpn_clients = await self.get_vpn_clients()
+        vpn_clients = await self.get_vpn_clients(site=site)
         client = next((c for c in vpn_clients if c.get("_id") == client_id), None)
         if not client:
             logger.warning(f"VPN client {client_id} not found")
         return client
 
-    async def get_vpn_server_details(self, server_id: str) -> Optional[Dict[str, Any]]:
+    async def get_vpn_server_details(self, server_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific VPN server.
 
         Args:
             server_id: ID of the VPN server to get details for
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             VPN server details if found, None otherwise
         """
-        vpn_servers = await self.get_vpn_servers()
+        vpn_servers = await self.get_vpn_servers(site=site)
         server = next((s for s in vpn_servers if s.get("_id") == server_id), None)
         if not server:
             logger.warning(f"VPN server {server_id} not found")
         return server
 
-    async def _update_vpn_config(self, config_id: str, update_data: Dict[str, Any]) -> bool:
+    async def _update_vpn_config(self, config_id: str, update_data: Dict[str, Any], site: Optional[str] = None) -> bool:
         """Update a VPN configuration.
 
         Args:
             config_id: ID of the VPN configuration to update
             update_data: Dictionary of fields to update (will be merged with existing)
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise
         """
+        target_site = site or self._connection.site
         try:
             # Fetch existing config to merge with updates
-            networks = await self._get_all_network_configs()
+            networks = await self._get_all_network_configs(site=site)
             existing = next((n for n in networks if n.get("_id") == config_id), None)
 
             if not existing:
@@ -228,72 +262,82 @@ class VpnManager:
                 path=f"/rest/networkconf/{config_id}",
                 data=merged_data,
             )
-            await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             logger.info(f"Updated VPN configuration {config_id}")
 
             # Invalidate caches
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_NETWORKS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_NETWORKS}_{target_site}")
             # Also invalidate VPN-specific caches
             for suffix in ["_True_True", "_True_False", "_False_True"]:
-                self._connection._invalidate_cache(f"{CACHE_PREFIX_VPN_CONFIGS}_{self._connection.site}{suffix}")
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_VPN_CONFIGS}_{target_site}{suffix}")
 
             return True
 
         except Exception as e:
-            logger.error(f"Error updating VPN configuration {config_id}: {e}")
+            logger.error(f"Error updating VPN configuration {config_id}: {e}", exc_info=True)
             return False
 
-    async def update_vpn_client_state(self, client_id: str, enabled: bool) -> bool:
+    async def update_vpn_client_state(self, client_id: str, enabled: bool, site: Optional[str] = None) -> bool:
         """Update the enabled state of a VPN client.
 
         Args:
             client_id: ID of the VPN client to update
             enabled: Whether the client should be enabled or disabled
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise
         """
-        client = await self.get_vpn_client_details(client_id)
+        client = await self.get_vpn_client_details(client_id, site=site)
         if not client:
             logger.error(f"VPN client {client_id} not found, cannot update state")
             return False
 
-        result = await self._update_vpn_config(client_id, {"enabled": enabled})
+        result = await self._update_vpn_config(client_id, {"enabled": enabled}, site=site)
         if result:
             logger.info(f"VPN client {client.get('name', client_id)} {'enabled' if enabled else 'disabled'}")
         return result
 
-    async def update_vpn_server_state(self, server_id: str, enabled: bool) -> bool:
+    async def update_vpn_server_state(self, server_id: str, enabled: bool, site: Optional[str] = None) -> bool:
         """Update the enabled state of a VPN server.
 
         Args:
             server_id: ID of the VPN server to update
             enabled: Whether the server should be enabled or disabled
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise
         """
-        server = await self.get_vpn_server_details(server_id)
+        server = await self.get_vpn_server_details(server_id, site=site)
         if not server:
             logger.error(f"VPN server {server_id} not found, cannot update state")
             return False
 
-        result = await self._update_vpn_config(server_id, {"enabled": enabled})
+        result = await self._update_vpn_config(server_id, {"enabled": enabled}, site=site)
         if result:
             logger.info(f"VPN server {server.get('name', server_id)} {'enabled' if enabled else 'disabled'}")
         return result
 
-    async def toggle_vpn_config(self, config_id: str) -> bool:
+    async def toggle_vpn_config(self, config_id: str, site: Optional[str] = None) -> bool:
         """Toggle a VPN configuration's enabled state.
 
         Args:
             config_id: ID of the VPN configuration to toggle
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise
         """
-        networks = await self._get_all_network_configs()
+        networks = await self._get_all_network_configs(site=site)
         config = next((n for n in networks if n.get("_id") == config_id), None)
 
         if not config or not is_vpn_network(config):
@@ -301,4 +345,4 @@ class VpnManager:
             return False
 
         new_state = not config.get("enabled", True)
-        return await self._update_vpn_config(config_id, {"enabled": new_state})
+        return await self._update_vpn_config(config_id, {"enabled": new_state}, site=site)

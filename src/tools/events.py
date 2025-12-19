@@ -1,181 +1,243 @@
 """
-UniFi Network MCP event and alarm tools.
+Unifi Network MCP events tools.
 
-This module provides MCP tools to view events and manage alarms on a UniFi Network Controller.
+This module provides MCP tools to interact with a Unifi Network Controller's events functions,
+including retrieving system events, alerts, and notifications.
+Supports multi-site operations with optional site parameter.
 """
 
 import logging
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, Optional, List
 
-from src.runtime import config, server
-from src.utils.confirmation import should_auto_confirm
+from src.runtime import config, event_manager, server, system_manager
 from src.utils.permissions import parse_permission
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
-
-# Lazy import to avoid circular dependencies
-_event_manager = None
-
-
-def _get_event_manager():
-    """Lazy-load the event manager to avoid circular imports."""
-    global _event_manager
-    if _event_manager is None:
-        from src.managers.event_manager import EventManager
-        from src.runtime import get_connection_manager
-
-        _event_manager = EventManager(get_connection_manager())
-    return _event_manager
 
 
 @server.tool(
     name="unifi_list_events",
-    description="""List events from the UniFi controller with optional filters.
-
-Returns system events like client connections, device status changes, and network alerts.
-Events are sorted by most recent first.""",
+    description="List events from the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def list_events(
-    within_hours: int = 24,
-    limit: int = 100,
-    start: int = 0,
-    event_type: Optional[str] = None,
-) -> Dict[str, Any]:
-    """List events with optional filtering."""
-    try:
-        event_manager = _get_event_manager()
-        events = await event_manager.get_events(
-            within=within_hours,
-            limit=limit,
-            start=start,
-            event_type=event_type,
-        )
+async def list_events(limit: int = 100, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for listing events with multi-site support.
 
-        return {
+    Args:
+        limit: Maximum number of events to return (default: 100)
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with events list and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        events = await events_manager.get_events(limit=limit, site=site_slug)
+
+        # Convert Event objects to plain dictionaries
+        events_raw = [e.raw if hasattr(e, "raw") else e for e in events]
+
+        return inject_site_metadata({
             "success": True,
-            "site": event_manager._connection.site,
-            "count": len(events),
-            "filters": {
-                "within_hours": within_hours,
-                "limit": limit,
-                "start": start,
-                "event_type": event_type,
-            },
-            "events": events,
-        }
+            "count": len(events_raw),
+            "events": events_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error listing events: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_list_alarms",
-    description="""List active alarms/alerts from the UniFi controller.
-
-Returns security alerts, connectivity issues, and other critical notifications.
-By default returns only active (non-archived) alarms.""",
+    name="unifi_get_event_details",
+    description="Get detailed information about a specific event by ID. Supports multi-site with optional site parameter.",
 )
-async def list_alarms(
-    include_archived: bool = False,
-    limit: int = 100,
-) -> Dict[str, Any]:
-    """List alarms with optional archived filter."""
-    try:
-        event_manager = _get_event_manager()
-        alarms = await event_manager.get_alarms(
-            archived=include_archived,
-            limit=limit,
-        )
+async def get_event_details(event_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting event details with multi-site support.
 
-        return {
-            "success": True,
-            "site": event_manager._connection.site,
-            "count": len(alarms),
-            "include_archived": include_archived,
-            "alarms": alarms,
-        }
+    Args:
+        event_id: The _id of the event
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with event details and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        event = await events_manager.get_event_details(event_id, site=site_slug)
+        if event:
+            event_raw = event.raw if hasattr(event, "raw") else event
+            return inject_site_metadata({
+                "success": True,
+                "event": event_raw,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Event with ID {event_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error listing alarms: {e}", exc_info=True)
+        logger.error(f"Error getting event details: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_get_event_types",
-    description="""Get a list of known event type prefixes for filtering events.
-
-Use these prefixes with unifi_list_events event_type parameter to filter specific event categories.""",
+    name="unifi_list_alerts",
+    description="List alerts from the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def get_event_types() -> Dict[str, Any]:
-    """Get list of event type prefixes."""
-    try:
-        event_manager = _get_event_manager()
-        prefixes = event_manager.get_event_type_prefixes()
+async def list_alerts(limit: int = 100, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for listing alerts with multi-site support.
 
-        return {
+    Args:
+        limit: Maximum number of alerts to return (default: 100)
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with alerts list and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        alerts = await events_manager.get_alerts(limit=limit, site=site_slug)
+
+        # Convert Alert objects to plain dictionaries
+        alerts_raw = [a.raw if hasattr(a, "raw") else a for a in alerts]
+
+        return inject_site_metadata({
             "success": True,
-            "event_types": prefixes,
-            "usage": "Use prefix value with unifi_list_events event_type parameter",
-        }
+            "count": len(alerts_raw),
+            "alerts": alerts_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting event types: {e}", exc_info=True)
+        logger.error(f"Error listing alerts: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_archive_alarm",
-    description="Archive (resolve/dismiss) a specific alarm by its ID",
+    name="unifi_get_alert_details",
+    description="Get detailed information about a specific alert by ID. Supports multi-site with optional site parameter.",
+)
+async def get_alert_details(alert_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting alert details with multi-site support.
+
+    Args:
+        alert_id: The _id of the alert
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with alert details and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        alert = await events_manager.get_alert_details(alert_id, site=site_slug)
+        if alert:
+            alert_raw = alert.raw if hasattr(alert, "raw") else alert
+            return inject_site_metadata({
+                "success": True,
+                "alert": alert_raw,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Alert with ID {alert_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error getting alert details: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
+    name="unifi_dismiss_alert",
+    description="Dismiss an alert by ID. Supports multi-site with optional site parameter.",
     permission_category="events",
     permission_action="update",
 )
-async def archive_alarm(alarm_id: str, confirm: bool = False) -> Dict[str, Any]:
-    """Archive a specific alarm."""
-    if not parse_permission(config.permissions, "event", "update"):
-        logger.warning(f"Permission denied for archiving alarm ({alarm_id}).")
-        return {"success": False, "error": "Permission denied to archive alarms."}
+async def dismiss_alert(alert_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for dismissing alert with multi-site support.
 
-    if not confirm and not should_auto_confirm():
-        return {"success": False, "error": "Confirmation required. Set confirm=true."}
+    Args:
+        alert_id: The _id of the alert to dismiss
+        site: Optional site name/slug. If None, uses current default site
 
-    try:
-        event_manager = _get_event_manager()
-        success = await event_manager.archive_alarm(alarm_id)
+    Returns:
+        Dict with operation result and site metadata
 
-        if success:
-            return {
-                "success": True,
-                "message": f"Alarm {alarm_id} archived successfully.",
-            }
-        return {"success": False, "error": f"Failed to archive alarm {alarm_id}."}
-    except Exception as e:
-        logger.error(f"Error archiving alarm {alarm_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_archive_all_alarms",
-    description="Archive (resolve/dismiss) all active alarms",
-    permission_category="events",
-    permission_action="update",
-)
-async def archive_all_alarms(confirm: bool = False) -> Dict[str, Any]:
-    """Archive all active alarms."""
-    if not parse_permission(config.permissions, "event", "update"):
-        logger.warning("Permission denied for archiving all alarms.")
-        return {"success": False, "error": "Permission denied to archive alarms."}
-
-    if not confirm and not should_auto_confirm():
-        return {"success": False, "error": "Confirmation required. Set confirm=true."}
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "events", "update"):
+        logger.warning(f"Permission denied for dismissing alert ({alert_id}).")
+        return {"success": False, "error": "Permission denied to dismiss alert."}
 
     try:
-        event_manager = _get_event_manager()
-        success = await event_manager.archive_all_alarms()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
+        success = await events_manager.dismiss_alert(alert_id, site=site_slug)
         if success:
-            return {
+            return inject_site_metadata({
                 "success": True,
-                "message": "All alarms archived successfully.",
-            }
-        return {"success": False, "error": "Failed to archive all alarms."}
+                "message": f"Alert {alert_id} dismissed successfully",
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to dismiss alert {alert_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error archiving all alarms: {e}", exc_info=True)
+        logger.error(f"Error dismissing alert {alert_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

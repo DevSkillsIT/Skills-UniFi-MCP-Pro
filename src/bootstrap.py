@@ -18,7 +18,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Optional, Set, Awaitable, Callable, List
 
 from dotenv import load_dotenv
 from omegaconf import OmegaConf
@@ -50,6 +50,77 @@ def setup_logging(level: str | None = None) -> logging.Logger:
 
 
 logger = setup_logging()
+
+# ---------------------------------------------------------------------------
+# Site configuration helpers -------------------------------------------------
+# ---------------------------------------------------------------------------
+
+
+def parse_allowed_sites(env_value: str) -> Optional[Set[str]]:
+    """
+    Parse UNIFI_SITE / UNIFI_ALLOWED_SITES env into a whitelist set.
+
+    Rules:
+    - "ALL" (any casing) or empty => None (all sites allowed)
+    - Comma-separated list => set of stripped values
+    """
+    if not env_value or env_value.strip().upper() == "ALL":
+        return None
+    return {s.strip() for s in env_value.split(",") if s.strip()}
+
+
+RAW_ALLOWED_SITES = os.getenv("UNIFI_ALLOWED_SITES", "")
+ALLOWED_SITES = parse_allowed_sites(RAW_ALLOWED_SITES)
+
+# Default site when no site parameter is provided
+DEFAULT_SITE = os.getenv("UNIFI_DEFAULT_SITE")
+if not DEFAULT_SITE and ALLOWED_SITES:
+    # Use first allowed as default
+    DEFAULT_SITE = next(iter(ALLOWED_SITES))
+DEFAULT_SITE = DEFAULT_SITE or "default"
+
+
+# Simple config error for startup validation
+class ConfigError(Exception):
+    pass
+
+
+async def validate_site_configuration(list_sites_func: Callable[[], Awaitable[List[Dict[str, Any]]]]) -> None:
+    """
+    Validate whitelist configuration against controller sites at startup.
+
+    Args:
+        list_sites_func: Coroutine returning list of sites (dicts with _id/name/desc)
+    """
+    if ALLOWED_SITES is None:
+        logger.info("✅ Site configuration: ALL-SITES mode (no whitelist)")
+        return
+
+    logger.info("Validating site whitelist against controller...")
+    sites = await list_sites_func()
+    site_keys = {
+        (s.get("_id") or "").lower()
+        for s in sites
+        if isinstance(s, dict)
+    } | {
+        (s.get("name") or "").lower()
+        for s in sites
+        if isinstance(s, dict)
+    } | {
+        (s.get("desc") or "").lower()
+        for s in sites
+        if isinstance(s, dict)
+    }
+
+    missing = [s for s in ALLOWED_SITES if s.lower() not in site_keys]
+    if missing:
+        available = [s.get("name") or s.get("desc") or s.get("_id") for s in sites if isinstance(s, dict)]
+        raise ConfigError(
+            f"Site whitelist entries not found: {', '.join(missing)}. "
+            f"Available sites: {', '.join([a for a in available if a])}"
+        )
+
+    logger.info(f"✅ Site whitelist validated: {len(ALLOWED_SITES)} entries")
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +259,7 @@ if UNIFI_CONTROLLER_TYPE not in VALID_CONTROLLER_TYPES:
 # Valid values: "eager" (all tools immediately), "lazy" (on-demand loading), "meta_only" (just meta-tools)
 # DEFAULT: "lazy" (New in v0.2.0) - Provides 96% token savings with seamless UX
 VALID_REGISTRATION_MODES = {"lazy", "eager", "meta_only"}
-UNIFI_TOOL_REGISTRATION_MODE = os.getenv("UNIFI_TOOL_REGISTRATION_MODE", "lazy").lower()
+UNIFI_TOOL_REGISTRATION_MODE = "eager"  # Force eager mode for immediate tool availability
 
 # Validate registration mode
 if UNIFI_TOOL_REGISTRATION_MODE not in VALID_REGISTRATION_MODES:

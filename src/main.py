@@ -12,10 +12,13 @@ import logging
 import os
 import sys  # Removed uvicorn import
 import traceback
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from src.bootstrap import (
     UNIFI_TOOL_REGISTRATION_MODE,
     logger,
+    validate_site_configuration,
 )  # ensures logging/env setup early
 from src.jobs import get_job_status, start_async_tool
 
@@ -23,6 +26,7 @@ from src.jobs import get_job_status, start_async_tool
 from src.runtime import (
     config,
     connection_manager,
+    system_manager,
     server,
 )
 from src.tool_index import register_tool, tool_index_handler
@@ -233,6 +237,14 @@ async def main_async():
     else:
         logger.info("Global Unifi connection initialized successfully from main_async.")
 
+    # Validate whitelist configuration (fail-fast if misconfigured)
+    try:
+        await validate_site_configuration(system_manager.list_sites)
+        logger.info("✅ Site whitelist validation enabled and working")
+    except Exception as cfg_e:
+        logger.error(f"Site configuration validation failed: {cfg_e}")
+        raise
+
     # Register meta-tools first (always available regardless of mode)
     register_meta_tools(
         server=server,
@@ -316,14 +328,20 @@ async def main_async():
     else:
         http_enabled = bool(http_enabled_raw)
 
-    # Only the main container process (PID 1) should bind the HTTP SSE port.
+    # Only the main container process (PID 1) should bind the HTTP SSE port unless forced
+    force_http = os.getenv("UNIFI_MCP_HTTP_FORCE", "").strip().lower() in {"1", "true", "yes", "on"}
     is_main_container_process = os.getpid() == 1
-    if http_enabled and not is_main_container_process:
+    if http_enabled and not is_main_container_process and not force_http:
         logger.info(
             "HTTP SSE enabled in config but skipped in exec session (PID %s != 1)",
             os.getpid(),
         )
         http_enabled = False
+    elif http_enabled and force_http and not is_main_container_process:
+        logger.info(
+            "HTTP SSE enabled and forced via UNIFI_MCP_HTTP_FORCE (PID %s)",
+            os.getpid(),
+        )
 
     async def run_stdio():
         logger.info("Starting FastMCP stdio server ...")
@@ -331,6 +349,43 @@ async def main_async():
 
     tasks = [run_stdio()]
     if http_enabled:
+        # Health endpoint para probes (via FastMCP custom_route)
+        @server.custom_route("/health", methods=["GET"])
+        async def health(request: Request):  # type: ignore[arg-type]
+            return JSONResponse({"status": "healthy", "service": "unifi-network-mcp"})
+
+        # Test endpoint para validar resolução de sites (TEMPORÁRIO)
+        @server.custom_route("/test-site-resolution", methods=["GET"])
+        async def test_site_resolution(request: Request):  # type: ignore[arg-type]
+            """Endpoint de teste para validar resolução de display name → slug."""
+            from src.utils.site_resolver import resolve_site_identifier
+
+            # Get site parameter from query string
+            site_param = request.query_params.get("site")
+            if not site_param:
+                return JSONResponse({
+                    "success": False,
+                    "error": "Missing 'site' query parameter. Usage: /test-site-resolution?site=MA_PMW_MacHotel"
+                }, status_code=400)
+
+            try:
+                result = await resolve_site_identifier(site_param)
+                return JSONResponse({
+                    "success": True,
+                    "input": site_param,
+                    "resolved": {
+                        "slug": result["slug"],
+                        "id": result["id"]
+                    },
+                    "message": f"✅ Resolvido: '{site_param}' → slug='{result['slug']}'"
+                })
+            except Exception as e:
+                return JSONResponse({
+                    "success": False,
+                    "input": site_param,
+                    "error": str(e),
+                    "error_type": type(e).__name__
+                }, status_code=500)
 
         async def run_http():
             try:

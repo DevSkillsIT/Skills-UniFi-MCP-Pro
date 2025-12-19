@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from aiounifi.models.api import ApiRequest
 from aiounifi.models.device import Device
@@ -21,29 +22,41 @@ class DeviceManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_devices(self) -> List[Device]:
-        """Get list of devices for the current site."""
+    async def get_devices(self, site: Optional[str] = None) -> List[Device]:
+        """Get list of devices for the target site (defaults to current)."""
         if not await self._connection.ensure_connected() or not self._connection.controller:
             return []
 
-        cache_key = f"{CACHE_PREFIX_DEVICES}_{self._connection.site}"
-        cached_data: Optional[List[Device]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_DEVICES}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            await self._connection.controller.devices.update()
-            devices: List[Device] = list(self._connection.controller.devices.values())
-            self._connection._update_cache(cache_key, devices)
-            return devices
-        except Exception as e:
-            logger.error(f"Error getting devices: {e}")
-            return []
+        async with lock:
+            cached_data: Optional[List[Device]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-    async def get_device_details(self, device_mac: str) -> Optional[Device]:
+            original_site = self._connection.site
+            try:
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                await self._connection.controller.devices.update()
+                devices: List[Device] = list(self._connection.controller.devices.values())
+                self._connection._update_cache(cache_key, devices)
+                return devices
+            except Exception as e:
+                logger.error(f"Error getting devices (site={target_site}): {e}")
+                return []
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
+
+    async def get_device_details(self, device_mac: str, site: Optional[str] = None) -> Optional[Device]:
         """Get detailed information for a specific device by MAC address."""
-        devices = await self.get_devices()
+        devices = await self.get_devices(site=site)
         device: Optional[Device] = next((d for d in devices if d.mac == device_mac), None)
         if not device:
             logger.debug(f"Device details for MAC {device_mac} not found in devices list.")

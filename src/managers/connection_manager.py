@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 import time as _time
 from typing import Any, Dict, Optional
@@ -9,6 +10,8 @@ from aiounifi.controller import Controller
 from aiounifi.errors import LoginRequired, RequestError, ResponseError
 from aiounifi.models.api import ApiRequest, ApiRequestV2
 from aiounifi.models.configuration import Configuration
+
+from src.bootstrap import ALLOWED_SITES  # Site whitelist (None = ALL)
 
 logger = logging.getLogger("unifi-network-mcp")
 
@@ -248,6 +251,14 @@ class ConnectionManager:
         - False: Force standard paths (/api)
         """
 
+        # Site NAME → ID mapping cache (CRÍTICO: UniFi API usa ID, não nome)
+        self._site_name_to_id: Dict[str, str] = {}
+        """
+        Mapeamento de site NAME → site ID.
+        Exemplo: {"SK_PMW_SkillsIT-Escritorio": "i06j58bm"}
+        Carregado via _load_site_mappings() após autenticação.
+        """
+
     @property
     def url_base(self) -> str:
         proto = "https"
@@ -359,6 +370,10 @@ class ConnectionManager:
                     self._initialized = True
                     logger.info(f"Successfully connected to Unifi controller at {self.host} for site '{self.site}'")
                     self._invalidate_cache()
+
+                    # CRÍTICO: Carregar mapeamento NAME → ID após autenticação
+                    await self._load_site_mappings()
+
                     return True
 
                 except (
@@ -391,6 +406,76 @@ class ConnectionManager:
                     self.controller = None
                     return False
             return False
+
+    async def _load_site_mappings(self) -> None:
+        """
+        Carrega mapeamento de site NAME → ID do controller.
+
+        CRÍTICO: UniFi API usa site ID (campo 'name') nas URLs, não o display name (campo 'desc').
+        Exemplo:
+        - Site ID: 'i06j58bm' (usado em /api/s/i06j58bm/...)
+        - Display Name: 'SK_PMW_SkillsIT-Escritorio' (nome legível)
+
+        Este método:
+        1. Busca todos os sites do controller (/api/self/sites)
+        2. Filtra pela whitelist (ALLOWED_SITES) quando configurada
+        3. Constrói mapeamento: {display_name: site_id}
+        4. SEGURANÇA: Não expõe sites fora da whitelist
+        """
+        try:
+            # Obter whitelist configurada (None = ALL)
+            allowed_sites = ALLOWED_SITES
+
+            # Endpoint para listar todos os sites
+            api_path = "/api/self/sites"
+            url = f"{self.url_base}{api_path}"
+
+            logger.debug(f"Buscando lista de sites em: {url}")
+
+            # Fazer request HTTP direto (antes de self.controller.site estar configurado)
+            async with self._aiohttp_session.get(url) as response:
+                if response.status != 200:
+                    logger.error(f"Falha ao buscar sites: HTTP {response.status}")
+                    return
+
+                data = await response.json()
+
+                if not isinstance(data, dict) or "data" not in data:
+                    logger.error(f"Resposta inválida do controller: {data}")
+                    return
+
+                sites = data["data"]
+                logger.debug(f"Controller retornou {len(sites)} sites")
+
+                # Construir mapeamento NAME → ID (apenas sites na whitelist se houver)
+                mapping_count = 0
+                for site in sites:
+                    site_id = site.get("name")  # Campo 'name' = ID do site
+                    display_name = site.get("desc")  # Campo 'desc' = nome legível
+
+                    if not site_id or not display_name:
+                        logger.warning(f"Site sem ID ou nome: {site}")
+                        continue
+
+                    # SEGURANÇA: Apenas mapear sites na whitelist quando houver
+                    if allowed_sites is not None and display_name not in allowed_sites:
+                        logger.debug(f"Site '{display_name}' ignorado (não está na whitelist)")
+                        continue
+
+                    self._site_name_to_id[display_name] = site_id
+                    mapping_count += 1
+                    logger.info(f"Mapeado: '{display_name}' → '{site_id}'")
+
+                logger.info(f"Mapeamento NAME→ID carregado: {mapping_count} sites permitidos" if allowed_sites else f"Mapeamento NAME→ID carregado: {mapping_count} sites (ALL-SITES)")
+
+                if mapping_count == 0 and allowed_sites is not None:
+                    logger.warning(
+                        f"ATENÇÃO: Nenhum site da whitelist encontrado no controller! "
+                        f"Whitelist: {allowed_sites}"
+                    )
+
+        except Exception as e:
+            logger.error(f"Erro ao carregar mapeamento de sites: {e}", exc_info=True)
 
     async def ensure_connected(self) -> bool:
         """Ensure the controller is connected, attempting to reconnect if necessary."""
@@ -591,15 +676,41 @@ class ConnectionManager:
             logger.debug("Invalidated entire cache")
 
     async def set_site(self, site: str):
-        """Update the target site and invalidate relevant cache.
-
-        Note: This attempts a dynamic switch. Full stability might require
-        re-initializing the connection manager or restarting the server.
         """
-        if self.controller and hasattr(self.controller.connectivity, "config"):
-            self.controller.connectivity.config.site = site
-            self.site = site
-            self._invalidate_cache()
-            logger.info(f"Switched target site to '{site}'. Cache invalidated. Re-login might occur on next request.")
-        else:
+        Atualiza o site alvo e invalida cache relevante.
+
+        CRÍTICO: Este método agora aceita display name e resolve para site ID automaticamente.
+
+        Args:
+            site: Display name do site (ex: 'SK_PMW_SkillsIT-Escritorio')
+                  ou site ID direto (ex: 'i06j58bm')
+
+        Fluxo:
+        1. Verifica se 'site' é um display name no mapeamento
+        2. Se sim, resolve para site ID
+        3. Se não, assume que já é site ID
+        4. Aplica o site ID no controller
+
+        Note: Este método tenta troca dinâmica. Estabilidade completa pode requerer
+        re-inicialização do connection manager ou restart do servidor.
+        """
+        if not self.controller or not hasattr(self.controller.connectivity, "config"):
             logger.warning("Cannot set site dynamically, controller or config not available.")
+            return
+
+        # CRÍTICO: Resolver display name → site ID
+        site_id = site  # Default: assumir que já é ID
+
+        if site in self._site_name_to_id:
+            # É um display name - resolver para ID
+            site_id = self._site_name_to_id[site]
+            logger.info(f"Resolvido display name '{site}' → site ID '{site_id}'")
+        else:
+            # Não está no mapeamento - pode ser ID direto ou site inválido
+            logger.debug(f"Site '{site}' não encontrado no mapeamento NAME→ID, assumindo que é site ID direto")
+
+        # Aplicar site ID no controller
+        self.controller.connectivity.config.site = site_id
+        self.site = site_id
+        self._invalidate_cache()
+        logger.info(f"Site alvo alterado para ID '{site_id}'. Cache invalidado. Re-login pode ocorrer no próximo request.")

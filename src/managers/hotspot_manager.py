@@ -3,6 +3,7 @@
 Manages hotspot voucher operations including creation, listing, and revocation.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -25,60 +26,76 @@ class HotspotManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_vouchers(self, create_time: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Get all hotspot vouchers for the current site.
+    async def get_vouchers(self, create_time: Optional[int] = None, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all hotspot vouchers for the specified site.
 
         Uses GET /stat/voucher endpoint.
 
         Args:
             create_time: Optional Unix timestamp to filter by creation time.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of voucher objects containing code, quota, duration, etc.
         """
-        cache_key = f"{CACHE_PREFIX_VOUCHERS}_{self._connection.site}"
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_VOUCHERS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        # Only use cache if no filter is applied
-        if create_time is None:
-            cached_data = self._connection.get_cached(cache_key)
-            if cached_data is not None:
-                return cached_data
+        async with lock:
+            # Only use cache if no filter is applied
+            if create_time is None:
+                cached_data = self._connection.get_cached(cache_key)
+                if cached_data is not None:
+                    return cached_data
 
-        try:
-            api_request = ApiRequest(method="get", path="/stat/voucher")
-            response = await self._connection.request(api_request)
+            if not await self._connection.ensure_connected():
+                return []
 
-            vouchers = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-            # Filter by create_time if specified
-            if create_time is not None:
-                vouchers = [v for v in vouchers if v.get("create_time") == create_time]
-            else:
-                self._connection._update_cache(cache_key, vouchers)
+                api_request = ApiRequest(method="get", path="/stat/voucher")
+                response = await self._connection.request(api_request)
 
-            return vouchers
-        except Exception as e:
-            logger.error(f"Error getting vouchers: {e}")
-            return []
+                vouchers = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
 
-    async def get_voucher_details(self, voucher_id: str) -> Optional[Dict[str, Any]]:
+                # Filter by create_time if specified
+                if create_time is not None:
+                    vouchers = [v for v in vouchers if v.get("create_time") == create_time]
+                else:
+                    self._connection._update_cache(cache_key, vouchers)
+
+                return vouchers
+            except Exception as e:
+                logger.error(f"Error getting vouchers (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_voucher_details(self, voucher_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get details for a specific voucher by ID.
 
         Args:
             voucher_id: The _id of the voucher.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Voucher object or None if not found.
         """
         try:
-            all_vouchers = await self.get_vouchers()
+            all_vouchers = await self.get_vouchers(site=site)
             voucher = next((v for v in all_vouchers if v.get("_id") == voucher_id), None)
             if not voucher:
                 logger.debug(f"Voucher {voucher_id} not found.")
@@ -96,6 +113,7 @@ class HotspotManager:
         up_limit_kbps: Optional[int] = None,
         down_limit_kbps: Optional[int] = None,
         bytes_limit_mb: Optional[int] = None,
+        site: Optional[str] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """Create one or more hotspot vouchers.
 
@@ -110,10 +128,12 @@ class HotspotManager:
             up_limit_kbps: Optional upload speed limit in Kbps.
             down_limit_kbps: Optional download speed limit in Kbps.
             bytes_limit_mb: Optional data transfer limit in MB.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of created voucher objects, or None on failure.
         """
+        target_site = site or self._connection.site
         try:
             payload: Dict[str, Any] = {
                 "cmd": "create-voucher",
@@ -136,43 +156,52 @@ class HotspotManager:
                 path="/cmd/hotspot",
                 data=payload,
             )
-            response = await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                response = await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             logger.info(f"Create voucher: {count} voucher(s), {expire_minutes} min, quota={quota}")
 
             # Invalidate cache
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_VOUCHERS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_VOUCHERS}_{target_site}")
 
             # Response contains create_time to fetch newly created vouchers
             if isinstance(response, list) and len(response) > 0:
                 create_time = response[0].get("create_time")
                 if create_time:
-                    return await self.get_vouchers(create_time=create_time)
+                    return await self.get_vouchers(create_time=create_time, site=site)
                 return response
             elif isinstance(response, dict):
                 create_time = response.get("create_time")
                 if create_time:
-                    return await self.get_vouchers(create_time=create_time)
+                    return await self.get_vouchers(create_time=create_time, site=site)
                 return [response] if response else None
 
             # Fallback: return all vouchers if we can't identify the new ones
-            return await self.get_vouchers()
+            return await self.get_vouchers(site=site)
 
         except Exception as e:
             logger.error(f"Error creating voucher: {e}", exc_info=True)
             return None
 
-    async def revoke_voucher(self, voucher_id: str) -> bool:
+    async def revoke_voucher(self, voucher_id: str, site: Optional[str] = None) -> bool:
         """Revoke/delete a voucher by its ID.
 
         Uses POST to /cmd/hotspot with delete-voucher command.
 
         Args:
             voucher_id: The _id of the voucher to revoke.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
             api_request = ApiRequest(
                 method="post",
@@ -182,12 +211,19 @@ class HotspotManager:
                     "_id": voucher_id,
                 },
             )
-            await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
 
             logger.info(f"Revoked voucher {voucher_id}")
 
             # Invalidate cache
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_VOUCHERS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_VOUCHERS}_{target_site}")
 
             return True
 

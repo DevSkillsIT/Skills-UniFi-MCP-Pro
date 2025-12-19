@@ -1,5 +1,6 @@
+import asyncio
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from aiounifi.models.api import ApiRequest
 from aiounifi.models.client import Client
@@ -21,73 +22,87 @@ class ClientManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_clients(self) -> List[Client]:
-        """Get list of currently online clients for the current site."""
+    async def _with_site(self, target_site: str, coro):
+        original_site = self._connection.site
+        try:
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            return await coro()
+        finally:
+            if target_site != original_site:
+                await self._connection.set_site(original_site)
+
+    async def get_clients(self, site: Optional[str] = None) -> List[Client]:
+        """Get list of currently online clients for the target site."""
         if not await self._connection.ensure_connected() or not self._connection.controller:
             return []
 
-        cache_key = f"{CACHE_PREFIX_CLIENTS}_online_{self._connection.site}"
-        cached_data: Optional[List[Client]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_CLIENTS}_online_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            await self._connection.controller.clients.update()
-            clients: List[Client] = list(self._connection.controller.clients.values())
-            # Fallback rationale:
-            # - Some controller models/versions may not populate the collection
-            #   via controller.clients.update().
-            # - UniFi API semantics: active/online clients are served from
-            #   /stat/sta, while historical/all clients are under /rest/user.
-            #   Therefore for "online" we fallback to GET /stat/sta.
-            if not clients:
+        async with lock:
+            cached_data: Optional[List[Client]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
+
+            async def fetch():
+                await self._connection.controller.clients.update()
+                clients: List[Client] = list(self._connection.controller.clients.values())
+                if clients:
+                    return clients
                 try:
                     raw_clients = await self._connection.request(ApiRequest(method="get", path="/stat/sta"))
                     if isinstance(raw_clients, list) and raw_clients:
-                        # Cache raw dicts; tool layer handles dict or Client
-                        self._connection._update_cache(cache_key, raw_clients)
                         return raw_clients  # type: ignore[return-value]
                 except Exception as fallback_e:
                     logger.debug(f"Raw clients fallback failed: {fallback_e}")
-            self._connection._update_cache(cache_key, clients)
-            return clients
-        except Exception as e:
-            logger.error(f"Error getting online clients: {e}")
-            return []
+                return clients
 
-    async def get_all_clients(self) -> List[Client]:
-        """Get list of all clients (including offline/historical) for the current site."""
+            try:
+                clients = await self._with_site(target_site, fetch)
+                self._connection._update_cache(cache_key, clients)
+                return clients
+            except Exception as e:
+                logger.error(f"Error getting online clients (site={target_site}): {e}")
+                return []
+
+    async def get_all_clients(self, site: Optional[str] = None) -> List[Client]:
+        """Get list of all clients (including offline/historical) for the target site."""
         if not await self._connection.ensure_connected() or not self._connection.controller:
             return []
 
-        cache_key = f"{CACHE_PREFIX_CLIENTS}_all_{self._connection.site}"
-        cached_data: Optional[List[Client]] = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_CLIENTS}_all_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            await self._connection.controller.clients_all.update()
-            all_clients: List[Client] = list(self._connection.controller.clients_all.values())
-            # Fallback rationale:
-            # - When the clients_all collection is empty, query the canonical
-            #   UniFi endpoint for all/historical client records.
-            # - UniFi API semantics: GET /rest/user returns all known clients
-            #   (legacy naming "user" == client record), not only currently
-            #   connected. This complements GET /stat/sta used for online-only.
-            if not all_clients:
+        async with lock:
+            cached_data: Optional[List[Client]] = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
+
+            async def fetch():
+                await self._connection.controller.clients_all.update()
+                all_clients: List[Client] = list(self._connection.controller.clients_all.values())
+                if all_clients:
+                    return all_clients
                 try:
                     raw_all = await self._connection.request(ApiRequest(method="get", path="/rest/user"))
                     if isinstance(raw_all, list) and raw_all:
-                        self._connection._update_cache(cache_key, raw_all)
                         return raw_all  # type: ignore[return-value]
                 except Exception as fallback_e:
                     logger.debug(f"Raw all-clients fallback failed: {fallback_e}")
-            self._connection._update_cache(cache_key, all_clients)
-            return all_clients
-        except Exception as e:
-            logger.error(f"Error getting all clients: {e}")
-            return []
+                return all_clients
+
+            try:
+                all_clients = await self._with_site(target_site, fetch)
+                self._connection._update_cache(cache_key, all_clients)
+                return all_clients
+            except Exception as e:
+                logger.error(f"Error getting all clients (site={target_site}): {e}")
+                return []
 
     async def get_client_details(self, client_mac: str) -> Optional[Client]:
         """Get detailed information for a specific client by MAC address."""

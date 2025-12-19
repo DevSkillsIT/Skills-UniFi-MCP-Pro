@@ -2,43 +2,65 @@
 Unifi Network MCP device management tools.
 
 This module provides MCP tools to manage devices in a Unifi Network Controller.
+Supports multi-site operations with optional site parameter.
 """
 
 import logging
+import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, Optional, List
 
-# Import the global FastMCP server instance, config, and managers
-from src.runtime import config, device_manager, server
-from src.utils.confirmation import create_preview, preview_response, should_auto_confirm, update_preview
+print("🔍 [DEBUG] devices.py module loading...")
+
+from src.runtime import config, device_manager, server, system_manager
+from src.utils.confirmation import create_preview, preview_response, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def get_wifi_bands(device: Dict[str, Any]) -> List[str]:
-    """Extract active WiFi bands from device radio table."""
-    bands = set()
-    for radio in device.get("radio_table", []):
-        if radio.get("radio") == "na":
-            bands.add("5GHz")
-        elif radio.get("radio") == "ng":
-            bands.add("2.4GHz")
-        elif radio.get("radio") == "wifi6e":
-            bands.add("6GHz")
-    return sorted(list(bands))
-
-
 @server.tool(
     name="unifi_list_devices",
-    description="List devices adopted by the Unifi Network controller for the current site",
+    description="List devices adopted by the Unifi Network controller. Optimized for token efficiency with summary mode by default.",
 )
-async def list_devices(device_type: str = "all", status: str = "all", include_details: bool = False) -> Dict[str, Any]:
-    """Implementation for listing devices."""
-    try:
-        devices = await device_manager.get_devices()
+async def list_devices(
+    device_type: str = "all",
+    summary: bool = True,
+    limit: int = 20,
+    site: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Implementation for listing devices with token-efficient defaults.
 
-        # Convert Device objects to plain dictionaries for easier filtering
+    Args:
+        device_type: Filter by device type (all, ap, switch, gateway, pdu)
+        summary: Return only essential fields (name, type, status, ip) - DEFAULT: True for token efficiency
+        limit: Maximum number of devices to return (default: 20, max: 100)
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with optimized device list and metadata
+    """
+    try:
+        print("🔍 [DEBUG] list_devices() starting...")
+        
+        # Enforce reasonable limits
+        limit = min(max(1, limit), 100)
+        
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        print(f"🔍 [DEBUG] Resolved site: {site_slug}")
+
+        devices = await device_manager.get_devices(site=site_slug)
+        print(f"🔍 [DEBUG] Got {len(devices)} devices from controller")
+
+        # Convert Device objects to plain dictionaries
         devices_raw = [d.raw if hasattr(d, "raw") else d for d in devices]
 
         # Filter by device type
@@ -53,165 +75,91 @@ async def list_devices(device_type: str = "all", status: str = "all", include_de
             if prefixes:
                 devices_raw = [d for d in devices_raw if d.get("type", "").startswith(prefixes)]
 
-        # Filter by status
-        if status != "all":
-            status_map = {
-                "online": 1,
-                "offline": 0,
-                "pending": 2,
-                "adopting": 4,
-                "provisioning": 5,
-                "upgrading": 6,
-            }
-            target_state = status_map.get(status)
-            if target_state is not None:
-                devices_raw = [d for d in devices_raw if d.get("state") == target_state]
-            else:
-                logger.warning(f"Unknown status filter: {status}")
+        # Apply limit
+        devices_raw = devices_raw[:limit]
 
-        formatted_devices = []
-        state_map = {
-            0: "offline",
-            1: "online",
-            2: "pending_adoption",
-            4: "managed_by_other/adopting",
-            5: "provisioning",
-            6: "upgrading",
-            11: "error/heartbeat_missed",
-        }
-
-        for device in devices_raw:
-            device_state = device.get("state", 0)
-            device_status_str = state_map.get(device_state, f"unknown_state ({device_state})")
-
-            device_info = {
-                "mac": device.get("mac", ""),
-                "name": device.get("name", device.get("model", "Unknown")),
-                "model": device.get("model", ""),
-                "type": device.get("type", ""),
-                "ip": device.get("ip", ""),
-                "status": device_status_str,
-                "uptime": str(timedelta(seconds=device.get("uptime", 0))) if device.get("uptime") else "N/A",
-                "last_seen": (
-                    datetime.fromtimestamp(device.get("last_seen", 0)).isoformat() if device.get("last_seen") else "N/A"
-                ),
-                "firmware": device.get("version", ""),
-                "adopted": device.get("adopted", False),
-                "_id": device.get("_id", ""),
-            }
-
-            if include_details:
-                details_to_add = {
-                    "serial": device.get("serial", ""),
-                    "hw_revision": device.get("hw_rev", ""),
-                    "model_display": device.get("model_display", device.get("model")),
-                    "clients": device.get("num_sta", 0),
+        # Optimized device data
+        if summary:
+            devices_optimized = []
+            for device in devices_raw:
+                device_summary = {
+                    "name": device.get("name", "Unknown"),
+                    "type": device.get("type", "unknown"),
+                    "model": device.get("model", ""),
+                    "state": device.get("state", "unknown"),
+                    "ip": device.get("ip", "N/A"),
+                    "mac": device.get("mac", ""),
                 }
+                devices_optimized.append(device_summary)
+        else:
+            devices_optimized = devices_raw
 
-                device_type_prefix = device.get("type", "")[:3]
-
-                if device_type_prefix == "uap":
-                    details_to_add.update(
-                        {
-                            "radio_table": device.get("radio_table", []),
-                            "vap_table": device.get("vap_table", []),
-                            "wifi_bands": get_wifi_bands(device),
-                            "experience_score": device.get("satisfaction", 0),
-                            "num_clients": device.get("num_sta", 0),
-                        }
-                    )
-                elif device_type_prefix in ["usw", "usk"]:
-                    details_to_add.update(
-                        {
-                            "ports": device.get("port_table", []),
-                            "total_ports": len(device.get("port_table", [])),
-                            "num_clients": device.get("user-num_sta", 0) + device.get("guest-num_sta", 0),
-                            "poe_info": {
-                                "poe_current": device.get("poe_current"),
-                                "poe_power": device.get("poe_power"),
-                                "poe_voltage": device.get("poe_voltage"),
-                            },
-                        }
-                    )
-                elif device_type_prefix in ["ugw", "udm", "uxg"]:
-                    details_to_add.update(
-                        {
-                            "wan1": device.get("wan1", {}),
-                            "wan2": device.get("wan2", {}),
-                            "num_clients": device.get("user-num_sta", 0) + device.get("guest-num_sta", 0),
-                            "network_table": device.get("network_table", []),
-                            "system_stats": device.get("system-stats", {}),
-                            "speedtest_status": device.get("speedtest-status", {}),
-                        }
-                    )
-
-                device_info.update(details_to_add)
-
-            formatted_devices.append(device_info)
-
-        return {
+        result = {
             "success": True,
-            "site": device_manager._connection.site,
-            "filter_type": device_type,
-            "filter_status": status,
-            "count": len(formatted_devices),
-            "devices": formatted_devices,
+            "devices": devices_optimized,
+            "count": len(devices_optimized),
+            "filters": {
+                "device_type": device_type,
+                "summary_mode": summary,
+                "limit_applied": limit,
+            },
+            "token_usage": "optimized" if summary else "high"
         }
+        
+        print(f"🔍 [DEBUG] Returning {len(devices_optimized)} devices")
+        return inject_site_metadata(result, site_id, site_name, site_slug)
+        
     except Exception as e:
-        logger.error(f"Error listing devices: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        logger.error(f"🔍 [DEBUG] Error in list_devices: {e}", exc_info=True)
+        return inject_site_metadata({
+            "success": False,
+            "error": str(e),
+            "devices": [],
+            "count": 0,
+        }, site_id if 'site_id' in locals() else None, 
+           site_name if 'site_name' in locals() else None, 
+           site_slug if 'site_slug' in locals() else None)
 
 
 @server.tool(
     name="unifi_get_device_details",
-    description="Get detailed information about a specific device by MAC address",
+    description="Get detailed information for a specific device by MAC address. Supports multi-site with optional site parameter.",
 )
-async def get_device_details(mac_address: str) -> Dict[str, Any]:
-    """Implementation for getting device details."""
+async def get_device_details(
+    mac_address: str,
+    site: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Implementation for getting device details with multi-site support.
+
+    Args:
+        mac_address: MAC address or device name to search for
+        site: Optional site name/slug. If None, uses current default site.
+
+    Returns:
+        Dict with device details and metadata including site information
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        device = await device_manager.get_device_details(mac_address)
-        if device:
-            return {
-                "success": True,
-                "site": device_manager._connection.site,
-                "device": device.raw if hasattr(device, "raw") else device,
-            }
-        return {
-            "success": False,
-            "error": f"Device not found with MAC address: {mac_address}",
-        }
-    except Exception as e:
-        logger.error(f"Error getting device details for {mac_address}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-
-@server.tool(
-    name="unifi_reboot_device",
-    description="Reboot a specific device by MAC address",
-    permission_category="devices",
-    permission_action="update",
-)
-async def reboot_device(mac_address: str, confirm: bool = False) -> Dict[str, Any]:
-    """Implementation for rebooting a device."""
-    if not parse_permission(config.permissions, "device", "reboot"):
-        logger.warning(f"Permission denied for rebooting device ({mac_address}).")
-        return {"success": False, "error": "Permission denied to reboot device."}
-
-    try:
-        # Fetch device details to provide context in the preview
-        device = await device_manager.get_device_details(mac_address)
-        if not device:
-            return {
+        device_obj = await device_manager.get_device_details(mac_address, site=site_slug)
+        if not device_obj:
+            return inject_site_metadata({
                 "success": False,
                 "error": f"Device not found with MAC address: {mac_address}",
-            }
+                "device": None,
+            }, site_id, site_name, site_slug)
 
-        # Extract device info for preview
-        device_raw = device.raw if hasattr(device, "raw") else device
-        device_name = device_raw.get("name", device_raw.get("model", "Unknown"))
-        device_state = device_raw.get("state", 0)
-        device_model = device_raw.get("model", "")
+        # Convert Device object to plain dictionary
+        device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
 
+        # Format device information
         state_map = {
             0: "offline",
             1: "online",
@@ -221,210 +169,205 @@ async def reboot_device(mac_address: str, confirm: bool = False) -> Dict[str, An
             6: "upgrading",
             11: "error/heartbeat_missed",
         }
-        device_status = state_map.get(device_state, f"unknown_state ({device_state})")
 
-        if not confirm and not should_auto_confirm():
-            return preview_response(
-                action="reboot",
-                resource_type="device",
-                resource_id=mac_address,
-                resource_name=device_name,
-                current_state={
-                    "status": device_status,
-                    "model": device_model,
-                    "ip": device_raw.get("ip", ""),
-                },
-                proposed_changes={"action": "reboot - device will restart"},
-                warnings=["Device will be offline for 1-2 minutes during reboot"],
-            )
+        device_state = device_raw.get("state", 0)
+        device_status_str = state_map.get(device_state, f"unknown_state ({device_state})")
 
-        logger.info(f"Attempting to reboot device: {mac_address}")
-        success = await device_manager.reboot_device(mac_address)
+        device_info = {
+            "mac": device_raw.get("mac", ""),
+            "name": device_raw.get("name", device_raw.get("model", "Unknown")),
+            "model": device_raw.get("model", ""),
+            "type": device_raw.get("type", ""),
+            "ip": device_raw.get("ip", ""),
+            "status": device_status_str,
+            "uptime": str(timedelta(seconds=device_raw.get("uptime", 0))) if device_raw.get("uptime") else "N/A",
+            "last_seen": (
+                datetime.fromtimestamp(device_raw.get("last_seen", 0)).isoformat() if device_raw.get("last_seen") else "N/A"
+            ),
+            "firmware": device_raw.get("version", ""),
+            "adopted": device_raw.get("adopted", False),
+            "_id": device_raw.get("_id", ""),
+        }
 
-        if success:
-            return {
-                "success": True,
-                "message": f"Reboot initiated for device: {mac_address}",
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"Failed to reboot device: {mac_address}",
-            }
+        # Add type-specific details
+        if device_raw.get("type", "").startswith("uap"):  # Access Points
+            device_info["wifi_clients"] = device_raw.get("num_sta", 0)
+            device_info["wifi_bands"] = get_wifi_bands(device_raw)
+        elif device_raw.get("type", "").startswith(("usw", "usk")):  # Switches
+            device_info["ports_total"] = len(device_raw.get("port_table", []))
+            device_info["ports_up"] = len([p for p in device_raw.get("port_table", []) if p.get("up", False)])
+        elif device_raw.get("type", "").startswith(("ugw", "udm", "uxg")):  # Gateways
+            device_info["wan_ip"] = device_raw.get("wan_ip", "N/A")
+            device_info["uptime"] = device_raw.get("uptime", 0)
+
+        result = {
+            "success": True,
+            "device": device_info,
+        }
+
+        return inject_site_metadata(result, site_id, site_name, site_slug)
+        
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error rebooting device {mac_address}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        logger.error(f"Error getting device details: {e}", exc_info=True)
+        return inject_site_metadata({
+            "success": False,
+            "error": str(e),
+            "device": None,
+        }, site_id if 'site_id' in locals() else None, 
+           site_name if 'site_name' in locals() else None, 
+           site_slug if 'site_slug' in locals() else None)
 
 
 @server.tool(
-    name="unifi_rename_device",
-    description="Rename a device in the Unifi Network controller by MAC address",
+    name="unifi_reboot_device",
+    description="Reboot a specific device by MAC address. Supports multi-site with optional site parameter.",
     permission_category="devices",
     permission_action="update",
 )
-async def rename_device(mac_address: str, name: str, confirm: bool = False) -> Dict[str, Any]:
-    """Implementation for renaming a device."""
-    if not parse_permission(config.permissions, "device", "update"):
-        logger.warning(f"Permission denied for renaming device ({mac_address}).")
-        return {"success": False, "error": "Permission denied to rename device."}
+async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for rebooting a device with multi-site support.
 
+    Args:
+        mac_address: MAC address of the device to reboot
+        confirm: If True, skip confirmation prompt (requires admin privileges)
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with reboot result and metadata including site information
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        # Fetch device details to provide context in the preview
-        device = await device_manager.get_device_details(mac_address)
-        if not device:
-            return {
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        # Get device details first to verify it exists
+        device_obj = await device_manager.get_device_details(mac_address, site=site_slug)
+        if not device_obj:
+            return inject_site_metadata({
                 "success": False,
                 "error": f"Device not found with MAC address: {mac_address}",
-            }
+            }, site_id, site_name, site_slug)
 
-        # Extract device info for preview
-        device_raw = device.raw if hasattr(device, "raw") else device
-        current_name = device_raw.get("name", device_raw.get("model", "Unknown"))
+        device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
+        device_name = device_raw.get("name", "Unknown Device")
 
+        # Create preview for confirmation
         if not confirm and not should_auto_confirm():
-            return update_preview(
-                resource_type="device",
-                resource_id=mac_address,
-                resource_name=current_name,
-                current_state={
-                    "name": current_name,
-                    "model": device_raw.get("model", ""),
-                    "type": device_raw.get("type", ""),
-                },
-                updates={"name": name},
+            preview = create_preview(
+                action="reboot",
+                target=f"device '{device_name}' ({mac_address})",
+                site=site_name or site_slug
             )
+            return inject_site_metadata({
+                "success": False,
+                "requires_confirmation": True,
+                "preview": preview,
+                "message": "Please confirm the device reboot operation"
+            }, site_id, site_name, site_slug)
 
-        success = await device_manager.rename_device(mac_address, name)
+        # Execute reboot
+        success = await device_manager.reboot_device(mac_address, site=site_slug)
+
+        result = {
+            "success": success,
+            "device_name": device_name,
+            "mac_address": mac_address,
+            "action": "reboot",
+        }
+
         if success:
-            return {
-                "success": True,
-                "message": f"Device {mac_address} renamed to '{name}' successfully.",
-            }
-        return {"success": False, "error": f"Failed to rename device {mac_address}."}
+            result["message"] = f"Device '{device_name}' reboot initiated successfully"
+        else:
+            result["error"] = f"Failed to reboot device '{device_name}'"
+
+        return inject_site_metadata(result, site_id, site_name, site_slug)
+        
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error renaming device {mac_address}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        logger.error(f"Error rebooting device: {e}", exc_info=True)
+        return inject_site_metadata({
+            "success": False,
+            "error": str(e),
+        }, site_id if 'site_id' in locals() else None, 
+           site_name if 'site_name' in locals() else None, 
+           site_slug if 'site_slug' in locals() else None)
 
 
 @server.tool(
     name="unifi_adopt_device",
-    description="Adopt a pending device into the Unifi Network by MAC address",
+    description="Adopt a pending device into the Unifi Network by MAC address. Supports multi-site with optional site parameter.",
     permission_category="devices",
     permission_action="create",
 )
-async def adopt_device(mac_address: str, confirm: bool = False) -> Dict[str, Any]:
-    """Implementation for adopting a device."""
-    if not parse_permission(config.permissions, "device", "adopt"):
-        logger.warning(f"Permission denied for adopting device ({mac_address}).")
-        return {"success": False, "error": "Permission denied to adopt device."}
+async def adopt_device(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for adopting a device with multi-site support.
 
+    Args:
+        mac_address: MAC address of the device to adopt
+        confirm: If True, skip confirmation prompt (requires admin privileges)
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with adoption result and metadata including site information
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        # Fetch device details to provide context in the preview
-        device = await device_manager.get_device_details(mac_address)
-        if not device:
-            return {
-                "success": False,
-                "error": f"Device not found with MAC address: {mac_address}",
-            }
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Extract device info for preview
-        device_raw = device.raw if hasattr(device, "raw") else device
-        device_name = device_raw.get("name", device_raw.get("model", "Unknown"))
-        device_state = device_raw.get("state", 0)
-
+        # Create preview for confirmation
         if not confirm and not should_auto_confirm():
-            return create_preview(
-                resource_type="device_adoption",
-                resource_name=device_name,
-                resource_data={
-                    "mac": mac_address,
-                    "name": device_name,
-                    "model": device_raw.get("model", ""),
-                    "type": device_raw.get("type", ""),
-                    "ip": device_raw.get("ip", ""),
-                    "current_state": device_state,
-                },
-                warnings=[
-                    "Device will be adopted into this site",
-                    "Device may reboot during adoption process",
-                ],
+            preview = create_preview(
+                action="adopt",
+                target=f"device with MAC {mac_address}",
+                site=site_name or site_slug
             )
-
-        success = await device_manager.adopt_device(mac_address)
-        if success:
-            return {
-                "success": True,
-                "message": f"Adoption initiated for device: {mac_address}",
-            }
-        return {"success": False, "error": f"Failed to adopt device {mac_address}."}
-    except Exception as e:
-        logger.error(f"Error adopting device {mac_address}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_upgrade_device",
-    description="Initiate a firmware upgrade for a device by MAC address (uses cached firmware by default)",
-    permission_category="devices",
-    permission_action="update",
-)
-async def upgrade_device(mac_address: str, confirm: bool = False) -> Dict[str, Any]:
-    """Implementation for upgrading a device."""
-    if not parse_permission(config.permissions, "device", "upgrade"):
-        logger.warning(f"Permission denied for upgrading device ({mac_address}).")
-        return {"success": False, "error": "Permission denied to upgrade device."}
-
-    try:
-        # Fetch device details to provide context in the preview
-        device = await device_manager.get_device_details(mac_address)
-        if not device:
-            return {
+            return inject_site_metadata({
                 "success": False,
-                "error": f"Device not found with MAC address: {mac_address}",
-            }
+                "requires_confirmation": True,
+                "preview": preview,
+                "message": "Please confirm the device adoption operation"
+            }, site_id, site_name, site_slug)
 
-        # Extract device info for preview
-        device_raw = device.raw if hasattr(device, "raw") else device
-        device_name = device_raw.get("name", device_raw.get("model", "Unknown"))
-        current_version = device_raw.get("version", "unknown")
+        # Execute adoption
+        success = await device_manager.adopt_device(mac_address, site=site_slug)
 
-        # Get upgrade information
-        upgrade_info = device_raw.get("upgrade") or device_raw.get("upgradable")
-        if isinstance(upgrade_info, bool):
-            upgrade_info = "available" if upgrade_info else "none"
+        result = {
+            "success": success,
+            "mac_address": mac_address,
+            "action": "adopt",
+        }
 
-        upgrade_to_version = device_raw.get("upgrade_to_firmware", "latest available")
-
-        if not confirm and not should_auto_confirm():
-            return preview_response(
-                action="upgrade",
-                resource_type="device",
-                resource_id=mac_address,
-                resource_name=device_name,
-                current_state={
-                    "firmware_version": current_version,
-                    "model": device_raw.get("model", ""),
-                    "upgrade_available": upgrade_info,
-                },
-                proposed_changes={
-                    "action": "firmware upgrade",
-                    "target_version": upgrade_to_version,
-                },
-                warnings=[
-                    "Device will be offline during firmware upgrade",
-                    "Upgrade process may take several minutes",
-                    "Do not power off device during upgrade",
-                ],
-            )
-
-        success = await device_manager.upgrade_device(mac_address)
         if success:
-            info_msg = f" (Upgrade info: {upgrade_info})" if upgrade_info else ""
-            return {
-                "success": True,
-                "message": f"Upgrade initiated for device: {mac_address}{info_msg}",
-            }
-        return {"success": False, "error": f"Failed to upgrade device {mac_address}."}
+            result["message"] = f"Device with MAC {mac_address} adopted successfully"
+        else:
+            result["error"] = f"Failed to adopt device with MAC {mac_address}"
+
+        return inject_site_metadata(result, site_id, site_name, site_slug)
+        
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error upgrading device {mac_address}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
+        logger.error(f"Error adopting device: {e}", exc_info=True)
+        return inject_site_metadata({
+            "success": False,
+            "error": str(e),
+        }, site_id if 'site_id' in locals() else None, 
+           site_name if 'site_name' in locals() else None, 
+           site_slug if 'site_slug' in locals() else None)

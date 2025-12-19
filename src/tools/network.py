@@ -3,208 +3,136 @@ Unifi Network MCP network tools.
 
 This module provides MCP tools to interact with a Unifi Network Controller's network functions,
 including managing LAN networks and WLANs.
+Supports multi-site operations with optional site parameter.
 """
 
 import json
 import logging
-from typing import Any, Dict
+import os
+from typing import Any, Dict, Optional, List
 
-from src.runtime import config, network_manager, server
+from src.runtime import config, network_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
 from src.validator_registry import UniFiValidatorRegistry
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_networks",
-    description="List all configured networks (LAN, WAN, VLAN-only) on the Unifi Network controller (V1 API based).",
+    description="List all configured networks (LAN, WAN, VLAN-only) on the Unifi Network controller (V1 API based). Supports multi-site with optional site parameter.",
 )
-async def list_networks() -> Dict[str, Any]:
-    """Lists all networks configured on the UniFi Network controller for the current site using the V1 API structure.
+async def list_networks(site: Optional[str] = None) -> Dict[str, Any]:
+    """Lists all networks configured on the UniFi Network controller for the specified site using the V1 API structure.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site.
+              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
 
     Returns:
-        A dictionary containing:
-        - success (bool): Indicates if the operation was successful.
-        - site (str): The identifier of the UniFi site queried.
-        - count (int): The number of networks found.
-        - networks (List[Dict]): A list of networks, each containing summary info based on the V1 API response, such as:
-            - _id (str): The unique identifier of the network.
-            - name (str): The user-defined name of the network.
-            - enabled (bool): Whether the network is active.
-            - purpose (str): The purpose of the network (e.g., 'corporate', 'guest', 'vlan-only', 'wan').
-            - ip_subnet (str, optional): The IP subnet in CIDR notation (if applicable).
-            - vlan_enabled (bool): Whether VLAN tagging is enabled.
-            - vlan (int, optional): The VLAN ID (if `vlan_enabled` is true).
-            - dhcpd_enabled (bool, optional): Whether DHCP server is enabled for this network.
-            - dhcpd_start (str, optional): Start IP of the DHCP range.
-            - dhcpd_stop (str, optional): End IP of the DHCP range.
-            - site_id (str): ID of the site the network belongs to.
-            # Note: Field names and availability might differ slightly based on controller version using V1 API.
-        - error (str, optional): An error message if the operation failed.
+        Dict with network list and site metadata
 
-    Example response (success):
-    {
-        "success": True,
-        "site": "default",
-        "count": 2,
-        "networks": [
-            {
-                "_id": "60a8b3c4d5e6f7a8b9c0d1e2", # Example ID
-                "name": "LAN",
-                "enabled": True,
-                "purpose": "corporate",
-                "ip_subnet": "192.168.1.0/24",
-                "vlan_enabled": False,
-                "vlan": null,
-                "dhcpd_enabled": True,
-                "dhcpd_start": "192.168.1.100",
-                "dhcpd_stop": "192.168.1.200",
-                "site_id": "..."
-            },
-            {
-                "_id": "60a8b3c4d5e6f7a8b9c0d1e3", # Example ID
-                "name": "IoT VLAN",
-                "enabled": True,
-                "purpose": "corporate", # Note: Purpose might map differently in V1
-                "ip_subnet": "10.10.20.0/24",
-                "vlan_enabled": True,
-                "vlan": 20,
-                "dhcpd_enabled": True,
-                "dhcpd_start": "10.10.20.100",
-                "dhcpd_stop": "10.10.20.200",
-                "site_id": "..."
-            }
-        ]
-    }
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "network", "read"):
-        logger.warning("Permission denied for listing networks.")
-        return {"success": False, "error": "Permission denied to list networks."}
     try:
-        # Get networks directly from the manager (which now uses V1)
-        networks_data = await network_manager.get_networks()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Manager returns list of dicts from V1 API or [] on error
-        # Basic reformatting/selection could be done here if needed,
-        # but for now, return the raw V1 structure received from manager.
-        serializable_networks = json.loads(json.dumps(networks_data, default=str))
+        networks = await network_manager.get_networks(site=site_slug)
 
-        return {
+        # Convert Network objects to plain dictionaries
+        networks_raw = [n.raw if hasattr(n, "raw") else n for n in networks]
+
+        return inject_site_metadata({
             "success": True,
-            "site": network_manager._connection.site,
-            "count": len(serializable_networks),
-            "networks": serializable_networks,
-        }
+            "count": len(networks_raw),
+            "networks": networks_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error listing networks in tool: {e}", exc_info=True)
+        logger.error(f"Error listing networks: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
     name="unifi_get_network_details",
-    description="Get details for a specific network by ID.",
+    description="Get detailed information about a specific network by ID. Supports multi-site with optional site parameter.",
 )
-async def get_network_details(network_id: str) -> Dict[str, Any]:
-    """Gets the detailed configuration of a specific network by its ID.
+async def get_network_details(network_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting network details with multi-site support.
 
     Args:
-        network_id (str): The unique identifier (_id) of the network.
+        network_id: The _id of the network
+        site: Optional site name/slug. If None, uses current default site
 
     Returns:
-        A dictionary containing:
-        - success (bool): Indicates if the operation was successful.
-        - site (str): The identifier of the UniFi site queried.
-        - network_id (str): The ID of the network requested.
-        - details (Dict[str, Any]): A dictionary containing the raw configuration details
-          of the network as returned by the UniFi controller.
-        - error (str, optional): An error message if the operation failed (e.g., network not found).
+        Dict with network details and site metadata
 
-    Example response (success):
-    {
-        "success": True,
-        "site": "default",
-        "network_id": "60a8b3c4d5e6f7a8b9c0d1e3",
-        "details": {
-            "_id": "60a8b3c4d5e6f7a8b9c0d1e3",
-            "name": "IoT VLAN",
-            "enabled": True,
-            "purpose": "corporate",
-            "ip_subnet": "10.10.20.0/24",
-            "vlan_enabled": True,
-            "vlan": 20,
-            "dhcpd_enabled": True,
-            "dhcpd_start": "10.10.20.100",
-            "dhcpd_stop": "10.10.20.200",
-            "site_id": "...",
-            # ... other fields
-        }
-    }
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "network", "read"):
-        logger.warning(f"Permission denied for getting network details ({network_id}).")
-        return {"success": False, "error": "Permission denied to get network details."}
     try:
-        if not network_id:
-            return {"success": False, "error": "network_id is required"}
-        # Assuming manager get_network_details returns the raw dict or None
-        network = await network_manager.get_network_details(network_id)
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        network = await network_manager.get_network_details(network_id, site=site_slug)
         if network:
-            # Ensure serializable
-            return {
+            network_raw = network.raw if hasattr(network, "raw") else network
+            return inject_site_metadata({
                 "success": True,
-                "site": network_manager._connection.site,
-                "network_id": network_id,
-                "details": json.loads(json.dumps(network, default=str)),
-            }
+                "network": network_raw,
+            }, site_id, site_name, site_slug)
         else:
-            return {
+            return inject_site_metadata({
                 "success": False,
-                "error": f"Network with ID '{network_id}' not found.",
-            }
+                "error": f"Network with ID {network_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting network details for {network_id}: {e}", exc_info=True)
+        logger.error(f"Error getting network details: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
     name="unifi_update_network",
-    description="Update specific fields of an existing network (LAN/VLAN). Requires confirmation.",
+    description="Update specific fields of an existing network (LAN/VLAN). Supports multi-site with optional site parameter. Requires confirmation.",
     permission_category="networks",
     permission_action="update",
 )
-async def update_network(network_id: str, update_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
-    """Updates specific fields of an existing network.
-
-    Allows modifying properties like name, purpose, VLAN settings, DHCP settings, etc.
-    Only provided fields are updated. Requires confirmation.
+async def update_network(network_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for updating network with multi-site support.
 
     Args:
-        network_id (str): The unique identifier (_id) of the network to update.
-        update_data (Dict[str, Any]): Dictionary of fields to update.
-            Allowed fields (all optional):
-            - name (string): New network name.
-            - purpose (string): New purpose ("corporate", "guest", "vlan-only").
-            - vlan_enabled (boolean): Enable/disable VLAN tagging.
-            - vlan (integer): New VLAN ID (1-4094).
-            - ip_subnet (string): New IP subnet (CIDR format).
-            - dhcp_enabled (boolean): Enable/disable DHCP server.
-            - dhcp_start (string): New DHCP start IP.
-            - dhcp_stop (string): New DHCP stop IP.
-            - enabled (boolean): Enable/disable the entire network.
-            # Add other relevant fields from NetworkSchema here if needed
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
+        network_id: The unique identifier (_id) of the network to update
+        update_data: Dictionary of fields to update
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
 
     Returns:
-        Dict: Success status, ID, updated fields, details, or error message.
-        Example (success):
-        {
-            "success": True,
-            "network_id": "60a8b3c4d5e6f7a8b9c0d1e3",
-            "updated_fields": ["name", "enabled"],
-            "details": { ... updated network details ... }
-        }
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
     """
     if not parse_permission(config.permissions, "network", "update"):
         logger.warning(f"Permission denied for updating network ({network_id}).")
@@ -215,71 +143,59 @@ async def update_network(network_id: str, update_data: Dict[str, Any], confirm: 
     if not update_data:
         return {"success": False, "error": "update_data cannot be empty"}
 
-    # Validate the update data
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_update", update_data)
-    if not is_valid:
-        logger.warning(f"Invalid network update data for ID {network_id}: {error_msg}")
-        return {"success": False, "error": f"Invalid update data: {error_msg}"}
-
-    if not validated_data:
-        logger.warning(f"Network update data for ID {network_id} is empty after validation.")
-        return {
-            "success": False,
-            "error": "Update data is effectively empty or invalid.",
-        }
-
-    # Fetch current state for preview
-    current = await network_manager.get_network_details(network_id)
-    if not current:
-        return {"success": False, "error": "Network not found"}
-
-    if not confirm and not should_auto_confirm():
-        return update_preview(
-            resource_type="network",
-            resource_id=network_id,
-            resource_name=current.get("name"),
-            current_state=current,
-            updates=validated_data,
-        )
-
-    # Basic cross-field validation (more complex logic might need Pydantic models)
-    if "vlan_enabled" in validated_data and validated_data["vlan_enabled"] and "vlan" not in validated_data:
-        # Check if existing network already has VLAN ID if only enabling
-        pass  # Let manager handle fetching existing state for merge
-    if "vlan" in validated_data and (int(validated_data["vlan"]) < 1 or int(validated_data["vlan"]) > 4094):
-        return {"success": False, "error": "'vlan' must be between 1 and 4094."}
-    if "dhcp_enabled" in validated_data and validated_data["dhcp_enabled"]:
-        if "dhcp_start" not in validated_data or "dhcp_stop" not in validated_data:
-            # Check existing state? Or assume manager requires them if enabling?
-            pass  # Let manager handle potential partial updates
-
-    updated_fields_list = list(validated_data.keys())
-    logger.info(f"Attempting to update network '{network_id}' with fields: {', '.join(updated_fields_list)}")
     try:
-        # *** Assumption: Need network_manager.update_network(network_id, validated_data) ***
-        # This method needs implementation in NetworkManager.
-        success = await network_manager.update_network(network_id, validated_data)
-        error_message_detail = "Manager method update_network might not be fully implemented for partial updates."
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
+        # Validate the update data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_update", update_data)
+        if not is_valid:
+            logger.warning(f"Invalid network update data for ID {network_id}: {error_msg}")
+            return {"success": False, "error": f"Invalid update data: {error_msg}"}
+
+        if not validated_data:
+            logger.warning(f"Network update data for ID {network_id} is empty after validation.")
+            return {"success": False, "error": "Update data is effectively empty or invalid."}
+
+        # Fetch current state for preview
+        current = await network_manager.get_network_details(network_id, site=site_slug)
+        if not current:
+            return {"success": False, "error": "Network not found"}
+
+        if not confirm and not should_auto_confirm():
+            return update_preview(
+                resource_type="network",
+                resource_id=network_id,
+                resource_name=current.get("name"),
+                current_state=current,
+                updates=validated_data,
+            )
+
+        # Basic cross-field validation
+        if "vlan_enabled" in validated_data and validated_data["vlan_enabled"] and "vlan" not in validated_data:
+            pass  # Let manager handle fetching existing state for merge
+        if "vlan" in validated_data and (int(validated_data["vlan"]) < 1 or int(validated_data["vlan"]) > 4094):
+            return {"success": False, "error": "'vlan' must be between 1 and 4094."}
+
+        # Perform the update
+        success = await network_manager.update_network(network_id, validated_data, site=site_slug)
         if success:
-            updated_network = await network_manager.get_network_details(network_id)
-            logger.info(f"Successfully updated network ({network_id})")
-            return {
+            # Fetch updated details
+            updated = await network_manager.get_network_details(network_id, site=site_slug)
+            return inject_site_metadata({
                 "success": True,
                 "network_id": network_id,
-                "updated_fields": updated_fields_list,
-                "details": json.loads(json.dumps(updated_network, default=str)),
-            }
+                "updated_fields": list(validated_data.keys()),
+                "details": updated,
+            }, site_id, site_name, site_slug)
         else:
-            logger.error(f"Failed to update network ({network_id}). {error_message_detail}")
-            network_after_update = await network_manager.get_network_details(network_id)
-            return {
+            return inject_site_metadata({
                 "success": False,
-                "network_id": network_id,
-                "error": f"Failed to update network ({network_id}). Check server logs. {error_message_detail}",
-                "details_after_attempt": json.loads(json.dumps(network_after_update, default=str)),
-            }
-
+                "error": f"Failed to update network {network_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error updating network {network_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -287,173 +203,186 @@ async def update_network(network_id: str, update_data: Dict[str, Any], confirm: 
 
 @server.tool(
     name="unifi_create_network",
-    description="Create a new network (LAN/VLAN) with schema validation. Requires confirmation.",
+    description="Create a new network (LAN/VLAN) with schema validation. Supports multi-site with optional site parameter. Requires confirmation.",
     permission_category="networks",
     permission_action="create",
 )
-async def create_network(network_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
-    """Create a new network (LAN/VLAN) with comprehensive validation.
+async def create_network(network_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for creating network with multi-site support.
 
     Args:
-        network_data (Dict[str, Any]): Network configuration data
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
-
-    Required parameters in network_data:
-    - name (string): Network name
-    - purpose (string): Network purpose/type ("corporate", "guest", "wan", "vlan-only", "vpn-client", "vpn-server")
-
-    If purpose is not "vlan-only":
-    - ip_subnet (string): IP subnet in CIDR notation (e.g., "192.168.1.0/24") is required
-
-    If purpose is "vlan-only":
-    - vlan (integer): VLAN ID (1-4094) is required
-
-    If purpose is not "vlan-only" and dhcp_enabled is true:
-    - dhcp_start (string): Start of DHCP range is required
-    - dhcp_stop (string): End of DHCP range is required
-
-    Optional parameters:
-    - vlan_enabled (boolean): Whether VLAN is enabled (default: false)
-    - vlan (integer): VLAN ID (required if vlan_enabled is true)
-    - dhcp_enabled (boolean): Whether DHCP is enabled (default: true)
-    - enabled (boolean): Whether the network is enabled (default: true)
-
-    Example:
-    {
-        "name": "IoT Network",
-        "purpose": "corporate",
-        "ip_subnet": "10.20.0.0/24",
-        "vlan_enabled": true,
-        "vlan": 20,
-        "dhcp_enabled": true,
-        "dhcp_start": "10.20.0.100",
-        "dhcp_stop": "10.20.0.254"
-    }
+        network_data: Network configuration data
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
 
     Returns:
-    - success (boolean): Whether the operation succeeded
-    - network_id (string): ID of the created network if successful
-    - details (object): Details of the created network
-    - error (string): Error message if unsuccessful
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
     """
     if not parse_permission(config.permissions, "network", "create"):
         logger.warning("Permission denied for creating network.")
         return {"success": False, "error": "Permission denied to create network."}
 
-    # Moved imports
-    from src.validator_registry import UniFiValidatorRegistry
+    if not network_data:
+        return {"success": False, "error": "network_data is required"}
 
-    # Validate the input
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network", network_data)
-    if not is_valid:
-        logger.warning(f"Invalid network data: {error_msg}")
-        return {"success": False, "error": error_msg}
-
-    # Required fields check
-    required_fields = ["name", "purpose"]
-    missing_fields = [field for field in required_fields if field not in validated_data]
-    if missing_fields:
-        error = f"Missing required fields: {', '.join(missing_fields)}"
-        logger.warning(error)
-        return {"success": False, "error": error}
-
-    # Additional validation for purpose type
-    purpose = validated_data.get("purpose")
-    # Ensure purpose is one of the allowed values
-    allowed_purposes = [
-        "corporate",
-        "guest",
-        "wan",
-        "vlan-only",
-        "vpn-client",
-        "vpn-server",
-    ]  # Consider adding "bridge"? Check schema
-    if purpose not in allowed_purposes:
-        return {
-            "success": False,
-            "error": f"Invalid 'purpose': {purpose}. Must be one of {allowed_purposes}.",
-        }
-
-    # Validation based on purpose
-    if purpose != "vlan-only" and not validated_data.get("ip_subnet"):
-        return {
-            "success": False,
-            "error": f"'ip_subnet' is required for network purpose '{purpose}'",
-        }
-
-    if purpose == "vlan-only" and not validated_data.get("vlan"):
-        return {
-            "success": False,
-            "error": "'vlan' is required for network purpose 'vlan-only'.",
-        }
-
-    # Validation for DHCP
-    dhcp_enabled = validated_data.get("dhcp_enabled", True)
-    if (
-        purpose != "vlan-only"
-        and dhcp_enabled
-        and (not validated_data.get("dhcp_start") or not validated_data.get("dhcp_stop"))
-    ):
-        return {
-            "success": False,
-            "error": "'dhcp_start' and 'dhcp_stop' are required if dhcp_enabled is true (and purpose is not vlan-only).",
-        }
-
-    # Validation for VLAN
-    vlan_enabled = validated_data.get("vlan_enabled", False)
-    vlan_id = validated_data.get("vlan")
-    if vlan_enabled and not vlan_id:
-        return {
-            "success": False,
-            "error": "'vlan' is required when vlan_enabled is true",
-        }
-
-    if vlan_id is not None and (int(vlan_id) < 1 or int(vlan_id) > 4094):
-        return {"success": False, "error": "'vlan' must be between 1 and 4094."}
-
-    if not confirm and not should_auto_confirm():
-        return create_preview(
-            resource_type="network",
-            resource_data=validated_data,
-            resource_name=validated_data.get("name"),
-            warnings=["Creating a network may temporarily disrupt connectivity"],
-        )
-
-    logger.info(f"Attempting to create network '{validated_data['name']}' with purpose '{purpose}'")
     try:
-        # Use validated data directly
-        network_data = validated_data
-        network_data.setdefault("enabled", True)
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Assume manager returns the created dict or None/False
-        created_network = await network_manager.create_network(network_data)
-        if created_network and created_network.get("_id"):
-            new_network_id = created_network.get("_id")
-            logger.info(f"Successfully created network '{validated_data['name']}' with ID {new_network_id}")
-            return {
-                "success": True,
-                "site": network_manager._connection.site,
-                "message": f"Network '{validated_data['name']}' created successfully.",
-                "network_id": new_network_id,
-                "details": json.loads(json.dumps(created_network, default=str)),
-            }
-        else:
-            error_msg = (
-                created_network.get("error", "Manager returned failure")
-                if isinstance(created_network, dict)
-                else "Manager returned non-dict or failure"
+        # Validate the network data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_create", network_data)
+        if not is_valid:
+            logger.warning(f"Invalid network create data: {error_msg}")
+            return {"success": False, "error": f"Invalid network data: {error_msg}"}
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="network",
+                resource_name=validated_data.get("name", "Unknown"),
+                resource_data=validated_data,
             )
-            logger.error(f"Failed to create network '{validated_data['name']}'. Reason: {error_msg}")
+
+        # Create the network
+        result = await network_manager.create_network(validated_data, site=site_slug)
+        if result:
+            return inject_site_metadata({
+                "success": True,
+                "network_id": result.get("_id"),
+                "details": result,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": "Failed to create network",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error creating network: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+        # Validate the input
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network", network_data)
+        if not is_valid:
+            logger.warning(f"Invalid network data: {error_msg}")
+            return {"success": False, "error": error_msg}
+
+        # Required fields check
+        required_fields = ["name", "purpose"]
+        missing_fields = [field for field in required_fields if field not in validated_data]
+        if missing_fields:
+            error = f"Missing required fields: {', '.join(missing_fields)}"
+            logger.warning(error)
+            return {"success": False, "error": error}
+
+        # Additional validation for purpose type
+        purpose = validated_data.get("purpose")
+        # Ensure purpose is one of the allowed values
+        allowed_purposes = [
+            "corporate",
+            "guest",
+            "wan",
+            "vlan-only",
+            "vpn-client",
+            "vpn-server",
+        ]  # Consider adding "bridge"? Check schema
+        if purpose not in allowed_purposes:
             return {
                 "success": False,
-                "error": f"Failed to create network '{validated_data['name']}'. {error_msg}",
+                "error": f"Invalid 'purpose': {purpose}. Must be one of {allowed_purposes}.",
             }
-    except Exception as e:
-        logger.error(
-            f"Error creating network '{validated_data.get('name', 'unknown')}': {e}",
-            exc_info=True,
-        )
-        return {"success": False, "error": str(e)}
+
+        # Validation based on purpose
+        if purpose != "vlan-only" and not validated_data.get("ip_subnet"):
+            return {
+                "success": False,
+                "error": f"'ip_subnet' is required for network purpose '{purpose}'",
+            }
+
+        if purpose == "vlan-only" and not validated_data.get("vlan"):
+            return {
+                "success": False,
+                "error": "'vlan' is required for network purpose 'vlan-only'.",
+            }
+
+        # Validation for DHCP
+        dhcp_enabled = validated_data.get("dhcp_enabled", True)
+        if (
+            purpose != "vlan-only"
+            and dhcp_enabled
+            and (not validated_data.get("dhcp_start") or not validated_data.get("dhcp_stop"))
+        ):
+            return {
+                "success": False,
+                "error": "'dhcp_start' and 'dhcp_stop' are required if dhcp_enabled is true (and purpose is not vlan-only).",
+            }
+
+        # Validation for VLAN
+        vlan_enabled = validated_data.get("vlan_enabled", False)
+        vlan_id = validated_data.get("vlan")
+        if vlan_enabled and not vlan_id:
+            return {
+                "success": False,
+                "error": "'vlan' is required when vlan_enabled is true",
+            }
+
+        if vlan_id is not None and (int(vlan_id) < 1 or int(vlan_id) > 4094):
+            return {"success": False, "error": "'vlan' must be between 1 and 4094."}
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="network",
+                resource_data=validated_data,
+                resource_name=validated_data.get("name"),
+                warnings=["Creating a network may temporarily disrupt connectivity"],
+            )
+
+        logger.info(f"Attempting to create network '{validated_data['name']}' with purpose '{purpose}'")
+        try:
+            # Use validated data directly
+            network_data = validated_data
+            network_data.setdefault("enabled", True)
+
+            # Assume manager returns the created dict or None/False
+            created_network = await network_manager.create_network(network_data)
+            if created_network and created_network.get("_id"):
+                new_network_id = created_network.get("_id")
+                logger.info(f"Successfully created network '{validated_data['name']}' with ID {new_network_id}")
+                return {
+                    "success": True,
+                    "site": network_manager._connection.site,
+                    "message": f"Network '{validated_data['name']}' created successfully.",
+                    "network_id": new_network_id,
+                    "details": json.loads(json.dumps(created_network, default=str)),
+                }
+            else:
+                error_msg = (
+                    created_network.get("error", "Manager returned failure")
+                    if isinstance(created_network, dict)
+                    else "Manager returned non-dict or failure"
+                )
+                logger.error(f"Failed to create network '{validated_data['name']}'. Reason: {error_msg}")
+                return {
+                    "success": False,
+                    "error": f"Failed to create network '{validated_data['name']}'. {error_msg}",
+                }
+        except Exception as e:
+            logger.error(
+                f"Error creating network '{validated_data.get('name', 'unknown')}': {e}",
+                exc_info=True,
+            )
+            return {"success": False, "error": str(e)}
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
+    finally:
+        if original_site is not None:
+            network_manager._connection.site = original_site
 
 
 @server.tool(

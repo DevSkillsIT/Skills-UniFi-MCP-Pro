@@ -1,332 +1,424 @@
 """
-UniFi Network MCP static routing tools.
+Unifi Network MCP routing tools.
 
-This module provides MCP tools to manage static routes on a UniFi Network Controller.
+This module provides MCP tools to interact with a Unifi Network Controller's routing functions,
+including managing static routes, routing tables, and gateway configurations.
+Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import re
-from typing import Any, Dict, Optional
+import os
+from typing import Any, Dict, Optional, List
 
-from src.runtime import config, server
+from src.runtime import config, routing_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
+from src.validator_registry import UniFiValidatorRegistry
+from src.utils.site_context import resolve_site_context, inject_site_metadata
+from src.exceptions import (
+    SiteNotFoundError,
+    SiteForbiddenError,
+    InvalidSiteParameterError,
+)
 
 logger = logging.getLogger(__name__)
 
-# Lazy import to avoid circular dependencies
-_routing_manager = None
-
-
-def _get_routing_manager():
-    """Lazy-load the routing manager to avoid circular imports."""
-    global _routing_manager
-    if _routing_manager is None:
-        from src.managers.routing_manager import RoutingManager
-        from src.runtime import get_connection_manager
-
-        _routing_manager = RoutingManager(get_connection_manager())
-    return _routing_manager
-
-
-def _validate_cidr(network: str) -> bool:
-    """Validate a CIDR network notation."""
-    pattern = r"^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$"
-    if not re.match(pattern, network):
-        return False
-    parts = network.split("/")
-    ip_parts = parts[0].split(".")
-    prefix = int(parts[1])
-    return all(0 <= int(p) <= 255 for p in ip_parts) and 0 <= prefix <= 32
-
-
-def _validate_ip(ip: str) -> bool:
-    """Validate an IP address."""
-    pattern = r"^(\d{1,3}\.){3}\d{1,3}$"
-    if not re.match(pattern, ip):
-        return False
-    return all(0 <= int(p) <= 255 for p in ip.split("."))
-
 
 @server.tool(
-    name="unifi_list_routes",
-    description="""List all user-defined static routes for the current site.
-
-Returns route names, destination networks, next-hop addresses, and status.
-These are manually configured routes, not dynamic or system routes.""",
+    name="unifi_list_static_routes",
+    description="List all static routes on the Unifi Network controller. Supports multi-site with optional site parameter.",
 )
-async def list_routes() -> Dict[str, Any]:
-    """List all user-defined static routes."""
+async def list_static_routes(site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for listing static routes with multi-site support.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with static routes list and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        routing_manager = _get_routing_manager()
-        routes = await routing_manager.get_routes()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Format routes for readability
-        formatted_routes = []
-        for r in routes:
-            formatted = {
-                "_id": r.get("_id"),
-                "name": r.get("name"),
-                "network": r.get("static-route_network"),
-                "nexthop": r.get("static-route_nexthop"),
-                "distance": r.get("static-route_distance", 1),
-                "enabled": r.get("enabled", True),
-                "type": r.get("type", "nexthop-route"),
-            }
-            formatted_routes.append(formatted)
+        routes = await routing_manager.get_static_routes(site=site_slug)
 
-        return {
+        # Convert StaticRoute objects to plain dictionaries
+        routes_raw = [r.raw if hasattr(r, "raw") else r for r in routes]
+
+        return inject_site_metadata({
             "success": True,
-            "site": routing_manager._connection.site,
-            "count": len(formatted_routes),
-            "routes": formatted_routes,
-        }
+            "count": len(routes_raw),
+            "static_routes": routes_raw,
+        }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error listing routes: {e}", exc_info=True)
+        logger.error(f"Error listing static routes: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_list_active_routes",
-    description="""List all active routes from the device routing table.
-
-Includes both user-defined and system routes currently in effect.
-This shows the actual routing table state on the gateway device.
-
-Note: This endpoint may not be available on all controller versions.
-Returns empty list if unavailable.""",
+    name="unifi_get_static_route_details",
+    description="Get detailed information about a specific static route by ID. Supports multi-site with optional site parameter.",
 )
-async def list_active_routes() -> Dict[str, Any]:
-    """List all active routes from the routing table."""
+async def get_static_route_details(route_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for getting static route details with multi-site support.
+
+    Args:
+        route_id: The _id of the static route
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with static route details and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
     try:
-        routing_manager = _get_routing_manager()
-        routes = await routing_manager.get_active_routes()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        return {
-            "success": True,
-            "site": routing_manager._connection.site,
-            "count": len(routes),
-            "active_routes": routes,
-        }
-    except Exception as e:
-        logger.error(f"Error listing active routes: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_get_route_details",
-    description="Get detailed information about a specific static route by its ID",
-)
-async def get_route_details(route_id: str) -> Dict[str, Any]:
-    """Get details for a specific route."""
-    try:
-        routing_manager = _get_routing_manager()
-        route = await routing_manager.get_route_details(route_id)
-
+        route = await routing_manager.get_static_route_details(route_id, site=site_slug)
         if route:
-            return {
+            route_raw = route.raw if hasattr(route, "raw") else route
+            return inject_site_metadata({
                 "success": True,
-                "site": routing_manager._connection.site,
-                "route": route,
-            }
-        return {
-            "success": False,
-            "error": f"Route not found with ID: {route_id}",
-        }
+                "static_route": route_raw,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Static route with ID {route_id} not found",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error getting route details for {route_id}: {e}", exc_info=True)
+        logger.error(f"Error getting static route details: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_create_route",
-    description="""Create a new static route for advanced routing configuration.
-
-Specify destination network in CIDR format (e.g., "10.0.0.0/24") and
-next-hop IP address (e.g., "192.168.1.1").""",
-    permission_category="routes",
+    name="unifi_create_static_route",
+    description="Create a new static route with validation. Supports multi-site with optional site parameter. Requires confirmation.",
+    permission_category="routing",
     permission_action="create",
 )
-async def create_route(
-    name: str,
-    network: str,
-    nexthop: str,
-    distance: int = 1,
-    enabled: bool = True,
-    confirm: bool = False,
-) -> Dict[str, Any]:
-    """Create a new static route."""
-    if not parse_permission(config.permissions, "route", "create"):
-        logger.warning("Permission denied for creating routes.")
-        return {"success": False, "error": "Permission denied to create routes."}
+async def create_static_route(route_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for creating static route with multi-site support.
 
-    if not name or not name.strip():
-        return {"success": False, "error": "Name is required."}
+    Args:
+        route_data: Static route configuration data
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
 
-    if not _validate_cidr(network):
-        return {
-            "success": False,
-            "error": f"Invalid network format: {network}. Use CIDR notation (e.g., 10.0.0.0/24).",
-        }
+    Returns:
+        Dict with operation result and site metadata
 
-    if not _validate_ip(nexthop):
-        return {
-            "success": False,
-            "error": f"Invalid nexthop IP: {nexthop}. Use valid IP address.",
-        }
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "routing", "create"):
+        logger.warning("Permission denied for creating static route.")
+        return {"success": False, "error": "Permission denied to create static route."}
 
-    if distance < 1 or distance > 255:
-        return {"success": False, "error": "Distance must be between 1 and 255."}
-
-    if not confirm and not should_auto_confirm():
-        return create_preview(
-            resource_type="static_route",
-            resource_data={
-                "name": name.strip(),
-                "network": network,
-                "nexthop": nexthop,
-                "distance": distance,
-                "enabled": enabled,
-            },
-            resource_name=name.strip(),
-        )
+    if not route_data:
+        return {"success": False, "error": "route_data is required"}
 
     try:
-        routing_manager = _get_routing_manager()
-        route = await routing_manager.create_route(
-            name=name.strip(),
-            static_route_network=network,
-            static_route_nexthop=nexthop,
-            static_route_distance=distance,
-            enabled=enabled,
-        )
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        if route:
-            return {
+        # Validate the route data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("static_route_create", route_data)
+        if not is_valid:
+            logger.warning(f"Invalid static route create data: {error_msg}")
+            return {"success": False, "error": f"Invalid static route data: {error_msg}"}
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="static_route",
+                resource_name=validated_data.get("name", f"Route to {validated_data.get('network', 'Unknown')}"),
+                resource_data=validated_data,
+            )
+
+        # Create the static route
+        result = await routing_manager.create_static_route(validated_data, site=site_slug)
+        if result:
+            return inject_site_metadata({
                 "success": True,
-                "message": f"Route '{name}' created successfully.",
-                "site": routing_manager._connection.site,
-                "route": route,
-            }
-        return {"success": False, "error": "Failed to create route."}
+                "route_id": result.get("_id"),
+                "details": result,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": "Failed to create static route",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error creating route: {e}", exc_info=True)
+        logger.error(f"Error creating static route: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_update_route",
-    description="""Update an existing static route's properties.
-
-Can modify name, destination network, next-hop, distance, or enabled status.""",
-    permission_category="routes",
+    name="unifi_update_static_route",
+    description="Update a static route by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    permission_category="routing",
     permission_action="update",
 )
-async def update_route(
-    route_id: str,
-    name: Optional[str] = None,
-    network: Optional[str] = None,
-    nexthop: Optional[str] = None,
-    distance: Optional[int] = None,
-    enabled: Optional[bool] = None,
-    confirm: bool = False,
-) -> Dict[str, Any]:
-    """Update an existing static route."""
-    if not parse_permission(config.permissions, "route", "update"):
-        logger.warning(f"Permission denied for updating route ({route_id}).")
-        return {"success": False, "error": "Permission denied to update routes."}
+async def update_static_route(route_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for updating static route with multi-site support.
 
-    # Validate that at least one update is provided
-    if all(v is None for v in [name, network, nexthop, distance, enabled]):
-        return {
-            "success": False,
-            "error": "At least one field must be provided.",
-        }
+    Args:
+        route_id: The unique identifier (_id) of the static route to update
+        update_data: Dictionary of fields to update
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
 
-    # Validate formats if provided
-    if network is not None and not _validate_cidr(network):
-        return {
-            "success": False,
-            "error": f"Invalid network format: {network}. Use CIDR notation.",
-        }
+    Returns:
+        Dict with operation result and site metadata
 
-    if nexthop is not None and not _validate_ip(nexthop):
-        return {
-            "success": False,
-            "error": f"Invalid nexthop IP: {nexthop}.",
-        }
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "routing", "update"):
+        logger.warning(f"Permission denied for updating static route ({route_id}).")
+        return {"success": False, "error": "Permission denied to update static route."}
 
-    if distance is not None and (distance < 1 or distance > 255):
-        return {"success": False, "error": "Distance must be between 1 and 255."}
+    if not route_id:
+        return {"success": False, "error": "route_id is required"}
+    if not update_data:
+        return {"success": False, "error": "update_data cannot be empty"}
 
     try:
-        routing_manager = _get_routing_manager()
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Fetch current route state for preview
-        current_route = await routing_manager.get_route_details(route_id)
-        if not current_route:
-            return {
-                "success": False,
-                "error": f"Route not found with ID: {route_id}",
-            }
+        # Validate the update data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("static_route_update", update_data)
+        if not is_valid:
+            logger.warning(f"Invalid static route update data for ID {route_id}: {error_msg}")
+            return {"success": False, "error": f"Invalid update data: {error_msg}"}
+
+        # Fetch current state for preview
+        current = await routing_manager.get_static_route_details(route_id, site=site_slug)
+        if not current:
+            return {"success": False, "error": "Static route not found"}
 
         if not confirm and not should_auto_confirm():
-            # Build current state from the route
-            current_state = {
-                "name": current_route.get("name"),
-                "network": current_route.get("static-route_network"),
-                "nexthop": current_route.get("static-route_nexthop"),
-                "distance": current_route.get("static-route_distance", 1),
-                "enabled": current_route.get("enabled", True),
-            }
-
-            # Build updates dict with only provided values
-            updates = {
-                k: v
-                for k, v in {
-                    "name": name.strip() if name else None,
-                    "network": network,
-                    "nexthop": nexthop,
-                    "distance": distance,
-                    "enabled": enabled,
-                }.items()
-                if v is not None
-            }
-
             return update_preview(
                 resource_type="static_route",
                 resource_id=route_id,
-                resource_name=current_route.get("name"),
-                current_state=current_state,
-                updates=updates,
+                resource_name=current.get("name", f"Route to {current.get('network', 'Unknown')}"),
+                current_state=current,
+                updates=validated_data,
             )
 
-        success = await routing_manager.update_route(
-            route_id=route_id,
-            name=name.strip() if name else None,
-            static_route_network=network,
-            static_route_nexthop=nexthop,
-            static_route_distance=distance,
-            enabled=enabled,
-        )
-
+        # Perform the update
+        success = await routing_manager.update_static_route(route_id, validated_data, site=site_slug)
         if success:
-            return {
+            # Fetch updated details
+            updated = await routing_manager.get_static_route_details(route_id, site=site_slug)
+            return inject_site_metadata({
                 "success": True,
-                "message": f"Route {route_id} updated successfully.",
-                "updates": {
-                    k: v
-                    for k, v in {
-                        "name": name,
-                        "network": network,
-                        "nexthop": nexthop,
-                        "distance": distance,
-                        "enabled": enabled,
-                    }.items()
-                    if v is not None
-                },
-            }
-        return {"success": False, "error": f"Failed to update route {route_id}."}
+                "route_id": route_id,
+                "updated_fields": list(validated_data.keys()),
+                "details": updated,
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to update static route {route_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
-        logger.error(f"Error updating route {route_id}: {e}", exc_info=True)
+        logger.error(f"Error updating static route {route_id}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
+    name="unifi_delete_static_route",
+    description="Delete a static route by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    permission_category="routing",
+    permission_action="delete",
+)
+async def delete_static_route(route_id: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for deleting static route with multi-site support.
+
+    Args:
+        route_id: The unique identifier (_id) of the static route to delete
+        confirm: Must be set to True to execute
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "routing", "delete"):
+        logger.warning(f"Permission denied for deleting static route ({route_id}).")
+        return {"success": False, "error": "Permission denied to delete static route."}
+
+    if not route_id:
+        return {"success": False, "error": "route_id is required"}
+
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        # Fetch current state for preview
+        current = await routing_manager.get_static_route_details(route_id, site=site_slug)
+        if not current:
+            return {"success": False, "error": "Static route not found"}
+
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="static_route",
+                resource_id=route_id,
+                resource_name=current.get("name", f"Route to {current.get('network', 'Unknown')}"),
+                resource_data=current,
+                warnings=["This will permanently delete the static route"],
+            )
+
+        # Delete the static route
+        success = await routing_manager.delete_static_route(route_id, site=site_slug)
+        if success:
+            return inject_site_metadata({
+                "success": True,
+                "message": f"Static route {route_id} deleted successfully",
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to delete static route {route_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting static route {route_id}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
+    name="unifi_enable_static_route",
+    description="Enable a static route by ID. Supports multi-site with optional site parameter.",
+    permission_category="routing",
+    permission_action="update",
+)
+async def enable_static_route(route_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for enabling static route with multi-site support.
+
+    Args:
+        route_id: The _id of the static route to enable
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "routing", "update"):
+        logger.warning(f"Permission denied for enabling static route ({route_id}).")
+        return {"success": False, "error": "Permission denied to enable static route."}
+
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        success = await routing_manager.enable_static_route(route_id, site=site_slug)
+        if success:
+            return inject_site_metadata({
+                "success": True,
+                "message": f"Static route {route_id} enabled successfully",
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to enable static route {route_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error enabling static route {route_id}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
+    name="unifi_disable_static_route",
+    description="Disable a static route by ID. Supports multi-site with optional site parameter.",
+    permission_category="routing",
+    permission_action="update",
+)
+async def disable_static_route(route_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Implementation for disabling static route with multi-site support.
+
+    Args:
+        route_id: The _id of the static route to disable
+        site: Optional site name/slug. If None, uses current default site
+
+    Returns:
+        Dict with operation result and site metadata
+
+    Raises:
+        SiteNotFoundError: Site not found in controller
+        SiteForbiddenError: Access to site denied by whitelist
+        InvalidSiteParameterError: Site parameter validation failed
+    """
+    if not parse_permission(config.permissions, "routing", "update"):
+        logger.warning(f"Permission denied for disabling static route ({route_id}).")
+        return {"success": False, "error": "Permission denied to disable static route."}
+
+    try:
+        # Resolve site context and get metadata
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        success = await routing_manager.disable_static_route(route_id, site=site_slug)
+        if success:
+            return inject_site_metadata({
+                "success": True,
+                "message": f"Static route {route_id} disabled successfully",
+            }, site_id, site_name, site_slug)
+        else:
+            return inject_site_metadata({
+                "success": False,
+                "error": f"Failed to disable static route {route_id}",
+            }, site_id, site_name, site_slug)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error disabling static route {route_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

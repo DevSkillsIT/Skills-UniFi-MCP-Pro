@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -20,34 +21,49 @@ class QosManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_qos_rules(self) -> List[Dict[str, Any]]:
-        """Get QoS rules for the current site."""
-        cache_key = f"{CACHE_PREFIX_QOS}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+    async def get_qos_rules(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get QoS rules for the specified site."""
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_QOS}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequestV2(method="get", path="/qos-rules")
-            response = await self._connection.request(api_request)
-            rules = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
-            self._connection._update_cache(cache_key, rules)
-            return rules
-        except Exception as e:
-            logger.error(f"Error getting QoS rules: {e}")
-            return []
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-    async def get_qos_rule_details(self, rule_id: str) -> Optional[Dict[str, Any]]:
+            if not await self._connection.ensure_connected():
+                return []
+
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
+
+                api_request = ApiRequestV2(method="get", path="/qos-rules")
+                response = await self._connection.request(api_request)
+                rules = (
+                    response
+                    if isinstance(response, list)
+                    else response.get("data", [])
+                    if isinstance(response, dict)
+                    else []
+                )
+                self._connection._update_cache(cache_key, rules)
+                return rules
+            except Exception as e:
+                logger.error(f"Error getting QoS rules (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_qos_rule_details(self, rule_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get detailed information for a specific QoS rule."""
         try:
-            all_rules = await self.get_qos_rules()
+            all_rules = await self.get_qos_rules(site=site)
             rule = next((r for r in all_rules if r.get("_id") == rule_id), None)
             if not rule:
                 logger.warning(f"QoS rule {rule_id} not found in fetched list.")
@@ -56,12 +72,13 @@ class QosManager:
             logger.error(f"Error getting QoS rule details for {rule_id}: {e}", exc_info=True)
             return None
 
-    async def update_qos_rule(self, rule_id: str, update_data: Dict[str, Any]) -> bool:
+    async def update_qos_rule(self, rule_id: str, update_data: Dict[str, Any], site: Optional[str] = None) -> bool:
         """Update a QoS rule by merging updates with existing data.
 
         Args:
             rule_id: ID of the rule to update
             update_data: Dictionary of fields to update
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise
@@ -72,9 +89,10 @@ class QosManager:
             logger.warning(f"No update data provided for QoS rule {rule_id}.")
             return True  # No action needed
 
+        target_site = site or self._connection.site
         try:
             # 1. Fetch existing rule data
-            existing_rule = await self.get_qos_rule_details(rule_id)
+            existing_rule = await self.get_qos_rule_details(rule_id, site=site)
             if not existing_rule:
                 logger.error(f"QoS rule {rule_id} not found for update.")
                 return False
@@ -90,23 +108,32 @@ class QosManager:
                 path=f"/qos-rules/{rule_id}",
                 data=merged_data,  # Send full merged object
             )
-            await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
             logger.info(f"Update command sent for QoS rule {rule_id} with merged data.")
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{target_site}")
             return True
         except Exception as e:
             logger.error(f"Error updating QoS rule {rule_id}: {e}", exc_info=True)
             return False
 
-    async def create_qos_rule(self, rule_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def create_qos_rule(self, rule_data: Dict[str, Any], site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Create a new QoS rule.
 
         Args:
             rule_data: Dictionary with rule data
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             The created rule data if successful, None otherwise
         """
+        target_site = site or self._connection.site
         try:
             required_fields = ["name", "enabled"]
             for field in required_fields:
@@ -115,9 +142,16 @@ class QosManager:
                     return None
 
             api_request = ApiRequestV2(method="post", path="/qos-rules", data=rule_data)
-            response = await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                response = await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
             logger.info(f"Create command sent for QoS rule '{rule_data.get('name')}'")
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{target_site}")
 
             if (
                 isinstance(response, dict)
@@ -137,20 +171,29 @@ class QosManager:
             logger.error(f"Error creating QoS rule: {e}")
             return None
 
-    async def delete_qos_rule(self, rule_id: str) -> bool:
+    async def delete_qos_rule(self, rule_id: str, site: Optional[str] = None) -> bool:
         """Delete a QoS rule.
 
         Args:
             rule_id: ID of the rule to delete
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             bool: True if successful, False otherwise
         """
+        target_site = site or self._connection.site
         try:
             api_request = ApiRequestV2(method="delete", path=f"/qos-rules/{rule_id}")
-            await self._connection.request(api_request)
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                await self._connection.request(api_request)
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
             logger.info(f"Delete command sent for QoS rule {rule_id}")
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{self._connection.site}")
+            self._connection._invalidate_cache(f"{CACHE_PREFIX_QOS}_{target_site}")
             return True
         except Exception as e:
             logger.error(f"Error deleting QoS rule {rule_id}: {e}")

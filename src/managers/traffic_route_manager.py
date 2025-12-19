@@ -4,6 +4,7 @@ Manages policy-based traffic routing (V2 API) for VPN routing,
 domain-based routing, and other advanced routing scenarios.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -31,58 +32,77 @@ class TrafficRouteManager:
             connection_manager: The shared ConnectionManager instance.
         """
         self._connection = connection_manager
+        self._cache_locks: Dict[str, asyncio.Lock] = {}
 
-    async def get_traffic_routes(self) -> List[Dict[str, Any]]:
-        """Get all traffic routes for the current site.
+    async def get_traffic_routes(self, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get all traffic routes for the specified site.
 
         Uses GET /trafficroutes endpoint (V2 API).
+
+        Args:
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             List of traffic route objects.
         """
-        cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}"
-        cached_data = self._connection.get_cached(cache_key)
-        if cached_data is not None:
-            return cached_data
+        target_site = site or self._connection.site
+        cache_key = f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}"
+        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
 
-        try:
-            api_request = ApiRequestV2(method="get", path="/trafficroutes", data=None)
-            response = await self._connection.request(api_request)
+        async with lock:
+            cached_data = self._connection.get_cached(cache_key)
+            if cached_data is not None:
+                return cached_data
 
-            routes = (
-                response.get("data", [])
-                if isinstance(response, dict)
-                else response
-                if isinstance(response, list)
-                else []
-            )
+            if not await self._connection.ensure_connected():
+                return []
 
-            self._connection._update_cache(cache_key, routes)
-            return routes
-        except Exception as e:
-            logger.error(f"Error getting traffic routes: {e}")
-            return []
+            try:
+                original_site = self._connection.site
+                if target_site != original_site:
+                    await self._connection.set_site(target_site)
 
-    async def get_traffic_route_details(self, route_id: str) -> Optional[Dict[str, Any]]:
+                api_request = ApiRequestV2(method="get", path="/trafficroutes", data=None)
+                response = await self._connection.request(api_request)
+
+                routes = (
+                    response.get("data", [])
+                    if isinstance(response, dict)
+                    else response
+                    if isinstance(response, list)
+                    else []
+                )
+
+                self._connection._update_cache(cache_key, routes)
+                return routes
+            except Exception as e:
+                logger.error(f"Error getting traffic routes (site={target_site}): {e}", exc_info=True)
+                return []
+            finally:
+                if target_site != self._connection.site:
+                    await self._connection.set_site(original_site)
+
+    async def get_traffic_route_details(self, route_id: str, site: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get details for a specific traffic route by ID.
 
         Args:
             route_id: The _id of the traffic route.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             Traffic route object or None if not found.
         """
         try:
-            all_routes = await self.get_traffic_routes()
+            all_routes = await self.get_traffic_routes(site=site)
             route = next((r for r in all_routes if r.get("_id") == route_id), None)
             if not route:
                 logger.debug(f"Traffic route {route_id} not found.")
             return route
         except Exception as e:
-            logger.error(f"Error getting traffic route details for {route_id}: {e}")
+            logger.error(f"Error getting traffic route details for {route_id}: {e}", exc_info=True)
             return None
 
-    async def update_traffic_route(self, route_id: str, enabled: Optional[bool] = None, **kwargs) -> bool:
+    async def update_traffic_route(self, route_id: str, enabled: Optional[bool] = None, site: Optional[str] = None, **kwargs) -> bool:
         """Update a traffic route.
 
         Uses PUT /trafficroutes/{route_id} endpoint (V2 API).
@@ -91,64 +111,73 @@ class TrafficRouteManager:
         Args:
             route_id: The _id of the traffic route to update.
             enabled: Optional enable/disable setting.
+            site: Target site ID (slug). If None, uses current connection site.
             **kwargs: Additional fields to update.
 
         Returns:
             True if successful, False otherwise.
         """
+        target_site = site or self._connection.site
         try:
-            current = await self.get_traffic_route_details(route_id)
-            if not current:
-                logger.error(f"Traffic route {route_id} not found for update.")
-                return False
+            original_site = self._connection.site
+            if target_site != original_site:
+                await self._connection.set_site(target_site)
+            try:
+                current = await self.get_traffic_route_details(route_id, site=site)
+                if not current:
+                    logger.error(f"Traffic route {route_id} not found for update.")
+                    return False
 
-            # Start with full existing route and apply updates
-            payload: Dict[str, Any] = current.copy()
+                # Start with full existing route and apply updates
+                payload: Dict[str, Any] = current.copy()
 
-            if enabled is not None:
-                payload["enabled"] = enabled
+                if enabled is not None:
+                    payload["enabled"] = enabled
 
-            # Apply any additional updates
-            for key, value in kwargs.items():
-                if value is not None:
-                    payload[key] = value
+                # Apply any additional updates
+                for key, value in kwargs.items():
+                    if value is not None:
+                        payload[key] = value
 
-            api_request = ApiRequestV2(
-                method="put",
-                path=f"/trafficroutes/{route_id}",
-                data=payload,
-            )
-            await self._connection.request(api_request)
+                api_request = ApiRequestV2(
+                    method="put",
+                    path=f"/trafficroutes/{route_id}",
+                    data=payload,
+                )
+                await self._connection.request(api_request)
 
-            logger.info(f"Updated traffic route {route_id}")
+                logger.info(f"Updated traffic route {route_id}")
 
-            # Invalidate cache
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}")
+                # Invalidate cache
+                self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{target_site}")
 
-            return True
-
+                return True
+            finally:
+                if target_site != original_site:
+                    await self._connection.set_site(original_site)
         except Exception as e:
             logger.error(f"Error updating traffic route {route_id}: {e}", exc_info=True)
             return False
 
-    async def toggle_traffic_route(self, route_id: str) -> bool:
+    async def toggle_traffic_route(self, route_id: str, site: Optional[str] = None) -> bool:
         """Toggle a traffic route's enabled state.
 
         Args:
             route_id: The _id of the traffic route to toggle.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise.
         """
-        current = await self.get_traffic_route_details(route_id)
+        current = await self.get_traffic_route_details(route_id, site=site)
         if not current:
             logger.error(f"Traffic route {route_id} not found for toggle.")
             return False
 
         new_state = not current.get("enabled", True)
-        return await self.update_traffic_route(route_id, enabled=new_state)
+        return await self.update_traffic_route(route_id, enabled=new_state, site=site)
 
-    async def update_kill_switch(self, route_id: str, enabled: bool) -> bool:
+    async def update_kill_switch(self, route_id: str, enabled: bool, site: Optional[str] = None) -> bool:
         """Update the kill switch setting for a traffic route.
 
         The kill switch blocks all traffic if the route's target network
@@ -157,35 +186,18 @@ class TrafficRouteManager:
         Args:
             route_id: The _id of the traffic route.
             enabled: Whether to enable or disable the kill switch.
+            site: Target site ID (slug). If None, uses current connection site.
 
         Returns:
             True if successful, False otherwise.
         """
         try:
-            current = await self.get_traffic_route_details(route_id)
+            current = await self.get_traffic_route_details(route_id, site=site)
             if not current:
                 logger.error(f"Traffic route {route_id} not found for kill switch update.")
                 return False
 
-            payload: Dict[str, Any] = current.copy()
-            payload["kill_switch_enabled"] = enabled
-
-            api_request = ApiRequestV2(
-                method="put",
-                path=f"/trafficroutes/{route_id}",
-                data=payload,
-            )
-            await self._connection.request(api_request)
-
-            logger.info(f"Traffic route {route_id} kill switch {'enabled' if enabled else 'disabled'}")
-
-            self._connection._invalidate_cache(f"{CACHE_PREFIX_TRAFFIC_ROUTES}_{self._connection.site}")
-
-            return True
-
+            return await self.update_traffic_route(route_id, kill_switch=enabled, site=site)
         except Exception as e:
-            logger.error(
-                f"Error updating kill switch for traffic route {route_id}: {e}",
-                exc_info=True,
-            )
+            logger.error(f"Error updating kill switch for traffic route {route_id}: {e}", exc_info=True)
             return False
