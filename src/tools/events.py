@@ -7,24 +7,23 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
-from src.runtime import config, event_manager, server, system_manager
-from src.utils.permissions import parse_permission
-from src.utils.site_context import resolve_site_context, inject_site_metadata
 from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
     InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
 )
+from src.runtime import config, server, system_manager
+from src.utils.permissions import parse_permission
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_events",
-    description="List events from the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Eventos do controlador UniFi Network — histórico completo de ocorrências, atividades, incidentes e registros do sistema gerenciado. Use quando precisar auditar logs, rastrear ações de usuários ou investigar problemas de infraestrutura. Retorna lista cronológica de eventos com timestamps, tipos e descrições detalhadas no controlador UniFi.",
 )
 async def list_events(limit: int = 100, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -51,11 +50,16 @@ async def list_events(limit: int = 100, site: Optional[str] = None) -> Dict[str,
         # Convert Event objects to plain dictionaries
         events_raw = [e.raw if hasattr(e, "raw") else e for e in events]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(events_raw),
-            "events": events_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(events_raw),
+                "events": events_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -66,7 +70,7 @@ async def list_events(limit: int = 100, site: Optional[str] = None) -> Dict[str,
 
 @server.tool(
     name="unifi_get_event_details",
-    description="Get detailed information about a specific event by ID. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de evento UniFi Network específico — informações aprofundadas de ocorrência, atividade ou incidente identificado por ID único. Use quando precisar investigar registro específico, analisar ação de usuário ou auditar modificação no sistema. Retorna timestamp, tipo, descrição, origem e metadados completos do evento no controlador UniFi.",
 )
 async def get_event_details(event_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -91,15 +95,25 @@ async def get_event_details(event_id: str, site: Optional[str] = None) -> Dict[s
         event = await events_manager.get_event_details(event_id, site=site_slug)
         if event:
             event_raw = event.raw if hasattr(event, "raw") else event
-            return inject_site_metadata({
-                "success": True,
-                "event": event_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "event": event_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Event with ID {event_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Event with ID {event_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -110,7 +124,7 @@ async def get_event_details(event_id: str, site: Optional[str] = None) -> Dict[s
 
 @server.tool(
     name="unifi_list_alerts",
-    description="List alerts from the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Alertas do controlador UniFi Network — notificações críticas, avisos de sistema e problemas de infraestrutura gerados automaticamente. Use quando precisar monitorar status da rede, identificar falhas em equipamentos ou revisar mensagens importantes. Retorna lista de alertas ativos e históricos com severidade e descrição no controlador UniFi.",
 )
 async def list_alerts(limit: int = 100, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -137,11 +151,16 @@ async def list_alerts(limit: int = 100, site: Optional[str] = None) -> Dict[str,
         # Convert Alert objects to plain dictionaries
         alerts_raw = [a.raw if hasattr(a, "raw") else a for a in alerts]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(alerts_raw),
-            "alerts": alerts_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(alerts_raw),
+                "alerts": alerts_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -152,7 +171,7 @@ async def list_alerts(limit: int = 100, site: Optional[str] = None) -> Dict[str,
 
 @server.tool(
     name="unifi_get_alert_details",
-    description="Get detailed information about a specific alert by ID. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de alerta UniFi Network específico — informações aprofundadas de notificação, aviso crítico ou problema identificado por ID único. Use quando precisar investigar mensagem específica, analisar severidade ou auditar incidente de infraestrutura. Retorna timestamp, tipo, origem, descrição e metadados completos do alerta no controlador UniFi.",
 )
 async def get_alert_details(alert_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -177,15 +196,25 @@ async def get_alert_details(alert_id: str, site: Optional[str] = None) -> Dict[s
         alert = await events_manager.get_alert_details(alert_id, site=site_slug)
         if alert:
             alert_raw = alert.raw if hasattr(alert, "raw") else alert
-            return inject_site_metadata({
-                "success": True,
-                "alert": alert_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "alert": alert_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Alert with ID {alert_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Alert with ID {alert_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -196,7 +225,7 @@ async def get_alert_details(alert_id: str, site: Optional[str] = None) -> Dict[s
 
 @server.tool(
     name="unifi_dismiss_alert",
-    description="Dismiss an alert by ID. Supports multi-site with optional site parameter.",
+    description="Descarte de alerta UniFi Network específico via ID — remoção de notificação, aviso ou mensagem do painel de alertas ativos com permissões de administrador. Use quando precisar limpar avisos resolvidos, marcar problemas como tratados ou organizar notificações pendentes. Executa dismiss permanente do alerta no controlador UniFi com validação multi-site.",
     permission_category="events",
     permission_action="update",
 )
@@ -226,15 +255,25 @@ async def dismiss_alert(alert_id: str, site: Optional[str] = None) -> Dict[str, 
 
         success = await events_manager.dismiss_alert(alert_id, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Alert {alert_id} dismissed successfully",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Alert {alert_id} dismissed successfully",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to dismiss alert {alert_id}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to dismiss alert {alert_id}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise

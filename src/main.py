@@ -10,8 +10,10 @@ Responsibilities:
 import asyncio
 import logging
 import os
-import sys  # Removed uvicorn import
+import sys
 import traceback
+
+import uvicorn.config
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -30,13 +32,15 @@ from src.runtime import (
     server,
 )
 from src.tool_index import register_tool, tool_index_handler
+from src.utils.config_helpers import parse_config_bool
 from src.utils.diagnostics import diagnostics_enabled, wrap_tool
 from src.utils.lazy_tool_loader import setup_lazy_loading
 from src.utils.meta_tools import register_load_tools, register_meta_tools
 from src.utils.permissions import parse_permission  # noqa: E402
 from src.utils.tool_loader import auto_load_tools
 
-_original_tool_decorator = server.tool  # keep reference to wrap later
+# Use the original FastMCP tool decorator (saved in runtime.py before wrapping)
+_original_tool_decorator = getattr(server, "_original_tool", server.tool)
 
 
 def permissioned_tool(*d_args, **d_kwargs):  # acts like @server.tool
@@ -261,6 +265,13 @@ async def main_async():
         logger.info("   Meta-tools: unifi_tool_index, unifi_execute, unifi_batch, unifi_batch_status")
         logger.info("   Use unifi_execute to run any tool discovered via unifi_tool_index")
         logger.info("   To load all tools directly: set UNIFI_TOOL_REGISTRATION_MODE=eager")
+
+        # Setup lazy loading interceptor so unifi_execute/unifi_batch can load tools on demand
+        setup_lazy_loading(server, _original_tool_decorator)
+
+        from src.utils.lazy_tool_loader import TOOL_MODULE_MAP
+
+        logger.info(f"   On-demand loader ready - {len(TOOL_MODULE_MAP)} tools available via unifi_execute")
     elif UNIFI_TOOL_REGISTRATION_MODE == "lazy":
         logger.info("⚡ Tool registration mode: lazy")
         logger.info("   Meta-tools: unifi_tool_index, unifi_execute, unifi_batch, unifi_batch_status, unifi_load_tools")
@@ -322,26 +333,19 @@ async def main_async():
     host = config.server.get("host", "0.0.0.0")
     port = int(config.server.get("port", 3000))
     http_cfg = config.server.get("http", {})
-    http_enabled_raw = http_cfg.get("enabled", False)
-    if isinstance(http_enabled_raw, str):
-        http_enabled = http_enabled_raw.strip().lower() in {"1", "true", "yes", "on"}
-    else:
-        http_enabled = bool(http_enabled_raw)
+    http_enabled = parse_config_bool(http_cfg.get("enabled", False))
 
-    # Only the main container process (PID 1) should bind the HTTP SSE port unless forced
-    force_http = os.getenv("UNIFI_MCP_HTTP_FORCE", "").strip().lower() in {"1", "true", "yes", "on"}
+    # Only the main container process (PID 1) should bind the HTTP SSE port,
+    # unless http.force=true is set in config (for local development/testing).
+    force_http = parse_config_bool(http_cfg.get("force", False))
     is_main_container_process = os.getpid() == 1
     if http_enabled and not is_main_container_process and not force_http:
         logger.info(
-            "HTTP SSE enabled in config but skipped in exec session (PID %s != 1)",
+            "HTTP SSE enabled in config but skipped in exec session (PID %s != 1). "
+            "Set UNIFI_MCP_HTTP_FORCE=true to override.",
             os.getpid(),
         )
         http_enabled = False
-    elif http_enabled and force_http and not is_main_container_process:
-        logger.info(
-            "HTTP SSE enabled and forced via UNIFI_MCP_HTTP_FORCE (PID %s)",
-            os.getpid(),
-        )
 
     async def run_stdio():
         logger.info("Starting FastMCP stdio server ...")
@@ -390,9 +394,13 @@ async def main_async():
         async def run_http():
             try:
                 logger.info(f"Starting FastMCP HTTP SSE server on {host}:{port} ...")
-                # MCP SDK >= 1.10 (pinned to 1.13.1): configure host/port via settings
                 server.settings.host = host
                 server.settings.port = port
+
+                # Redirect uvicorn access logs to stderr to prevent stdout conflicts
+                # when running alongside stdio transport (stdout is used for JSON-RPC)
+                uvicorn.config.LOGGING_CONFIG["handlers"]["access"]["stream"] = "ext://sys.stderr"
+
                 await server.run_sse_async()
                 logger.info("HTTP SSE started via run_sse_async() using server.settings host/port.")
             except Exception as http_e:

@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)  # Changed logger name for consistency
 
 @server.tool(
     name="unifi_list_port_forwards",
-    description="List all port forwarding rules on your Unifi Network controller.",
+    description="Regras de port forwarding do controlador UniFi Network — redirecionamentos de portas, mapeamentos NAT e exposição de serviços internos para acesso externo via WAN. Use quando precisar listar port forwards, auditar NAT ou revisar exposição de serviços. Retorna lista completa de regras com protocolo, porta externa, IP interno e porta de destino no controlador UniFi.",
 )
 async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted return type
     """List all port forwarding rules configured on the UniFi Network controller.
@@ -85,7 +85,7 @@ async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted r
 
 @server.tool(
     name="unifi_get_port_forward",
-    description="Get a specific port forwarding rule by ID from your Unifi Network controller.",
+    description="Detalhes completos de regra de port forwarding UniFi Network específica — informações de redirecionamento de porta, mapeamento NAT e exposição de serviço identificados por ID único. Use quando precisar auditar port forward específico, validar NAT ou revisar configuração de redirecionamento. Retorna protocolo, portas, IP de destino e habilitação da regra no controlador UniFi.",
 )
 async def get_port_forward(
     port_forward_id: str,
@@ -152,7 +152,7 @@ async def get_port_forward(
 
 @server.tool(
     name="unifi_toggle_port_forward",
-    description="Toggle a port forwarding rule on or off on your Unifi Network controller.",
+    description="Habilitação/desabilitação de regra de port forwarding UniFi Network via ID — alternância de estado de redirecionamento de porta sem remoção permanente. Use quando precisar ativar/desativar port forward temporariamente, pausar NAT ou suspender exposição de serviço. Executa toggle de regra de redirecionamento no controlador UniFi com confirmação obrigatória.",
     permission_category="port_forwards",
     permission_action="update",
 )
@@ -263,7 +263,7 @@ async def toggle_port_forward(
 # Create Port Forward
 @server.tool(
     name="unifi_create_port_forward",
-    description="Create a new port forwarding rule on your Unifi Network controller using schema validation.",
+    description="Criação de regra de port forwarding UniFi Network com validação — novo redirecionamento de porta, mapeamento NAT ou exposição de serviço com confirmação obrigatória. Use quando precisar adicionar port forward, configurar NAT ou expor serviço interno. Cria regra de redirecionamento validada no controlador UniFi com suporte multi-site.",
     permission_category="port_forwards",
     permission_action="create",
 )
@@ -375,7 +375,7 @@ async def create_port_forward(port_forward_data: Dict[str, Any]) -> Dict[str, An
 # --- NEW UPDATE TOOL ---
 @server.tool(
     name="unifi_update_port_forward",
-    description="Update specific fields of an existing port forwarding rule using schema validation. Requires confirmation.",
+    description="Atualização de regra de port forwarding UniFi Network via ID — modificação de protocolo, portas, IP de destino ou habilitação com confirmação obrigatória. Use quando precisar ajustar port forward, modificar NAT ou alterar redirecionamento. Executa update parcial de regra de port forwarding no controlador UniFi com suporte multi-site.",
     permission_category="port_forwards",
     permission_action="update",
 )
@@ -537,7 +537,7 @@ async def update_port_forward(
 
 @server.tool(
     name="unifi_create_simple_port_forward",
-    description=("Create a port forward using a simplified schema. Returns a preview unless confirm=true."),
+    description="Criação simplificada de regra de port forwarding UniFi Network — novo redirecionamento de porta via schema compacto com preview automático e confirmação obrigatória. Use quando precisar criar port forward rapidamente, configurar NAT básico ou expor serviço simples. Cria regra de redirecionamento com schema simplificado no controlador UniFi.",
     permission_category="port_forwards",
     permission_action="create",
 )

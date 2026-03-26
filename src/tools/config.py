@@ -25,7 +25,7 @@ def register_config_tools(server: Server, system_manager: SystemManager, permiss
 
     @server.tool(
         name="unifi_get_site_settings",
-        description="Get current site settings (e.g., country code, timezone, connectivity monitoring).",
+        description="Configurações do site UniFi Network atual — parâmetros de sistema, código de país, fuso horário e monitoramento de conectividade. Use quando precisar consultar settings globais, verificar timezone configurado ou auditar parâmetros de monitoramento. Retorna configurações ativas com valores e descrições no controlador UniFi.",
         parameters={},
     )
     async def get_site_settings(ctx) -> Dict[str, Any]:

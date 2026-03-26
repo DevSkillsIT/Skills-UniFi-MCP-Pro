@@ -7,24 +7,22 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
-from src.runtime import config, stats_manager, server, system_manager
-from src.utils.permissions import parse_permission
-from src.utils.site_context import resolve_site_context, inject_site_metadata
 from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
     InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
 )
+from src.runtime import server, stats_manager, system_manager
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_get_system_stats",
-    description="Get system statistics for the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Estatísticas de sistema do controlador UniFi Network — métricas de desempenho, utilização de recursos e indicadores operacionais do hardware, firmware e serviços. Use quando precisar monitorar performance, auditar recursos ou analisar capacidade. Retorna métricas completas de CPU, memória, disco e uptime no controlador UniFi.",
 )
 async def get_system_stats(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -50,10 +48,15 @@ async def get_system_stats(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert Stats objects to plain dictionaries
         stats_raw = stats.raw if hasattr(stats, "raw") else stats
 
-        return inject_site_metadata({
-            "success": True,
-            "system_stats": stats_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "system_stats": stats_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -64,7 +67,7 @@ async def get_system_stats(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_device_stats",
-    description="Get statistics for a specific device by ID. Supports multi-site with optional site parameter.",
+    description="Estatísticas de dispositivo UniFi Network específico — métricas de desempenho, tráfego e utilização identificadas por ID único de equipamento, access point ou switch. Use quando precisar monitorar device específico, analisar performance ou diagnosticar problemas. Retorna throughput, clientes conectados e métricas operacionais no controlador UniFi.",
 )
 async def get_device_stats(device_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -89,15 +92,25 @@ async def get_device_stats(device_id: str, site: Optional[str] = None) -> Dict[s
         stats = await stats_manager.get_device_stats(device_id, site=site_slug)
         if stats:
             stats_raw = stats.raw if hasattr(stats, "raw") else stats
-            return inject_site_metadata({
-                "success": True,
-                "device_stats": stats_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "device_stats": stats_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Device statistics for ID {device_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Device statistics for ID {device_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -108,7 +121,7 @@ async def get_device_stats(device_id: str, site: Optional[str] = None) -> Dict[s
 
 @server.tool(
     name="unifi_get_network_stats",
-    description="Get network statistics for all networks. Supports multi-site with optional site parameter.",
+    description="Estatísticas de redes do controlador UniFi Network — métricas de tráfego, utilização de banda e performance para todas as VLANs, SSIDs e segmentos configurados. Use quando precisar monitorar networks, analisar throughput ou auditar consumo de banda. Retorna lista completa de métricas por rede no controlador UniFi.",
 )
 async def get_network_stats(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -134,11 +147,16 @@ async def get_network_stats(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert NetworkStats objects to plain dictionaries
         stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(stats_raw),
-            "network_stats": stats_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(stats_raw),
+                "network_stats": stats_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -149,7 +167,7 @@ async def get_network_stats(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_client_stats",
-    description="Get client statistics for connected clients. Supports multi-site with optional site parameter.",
+    description="Estatísticas de clientes conectados no controlador UniFi Network — métricas de consumo, throughput e performance para todos os dispositivos ativos em redes wireless, wired ou guest. Use quando precisar monitorar clients, analisar consumo ou identificar top users. Retorna lista completa de métricas por cliente no controlador UniFi.",
 )
 async def get_client_stats(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -175,11 +193,16 @@ async def get_client_stats(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert ClientStats objects to plain dictionaries
         stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(stats_raw),
-            "client_stats": stats_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(stats_raw),
+                "client_stats": stats_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -190,7 +213,7 @@ async def get_client_stats(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_ap_stats",
-    description="Get access point statistics for all APs. Supports multi-site with optional site parameter.",
+    description="Estatísticas de access points do controlador UniFi Network — métricas de performance, clientes conectados e utilização de canais para todos os APs wireless gerenciados. Use quando precisar monitorar APs, analisar cobertura ou diagnosticar RF. Retorna lista completa de métricas por access point no controlador UniFi.",
 )
 async def get_ap_stats(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -216,11 +239,16 @@ async def get_ap_stats(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert APStats objects to plain dictionaries
         stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(stats_raw),
-            "ap_stats": stats_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(stats_raw),
+                "ap_stats": stats_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -231,7 +259,7 @@ async def get_ap_stats(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_switch_stats",
-    description="Get switch statistics for all switches. Supports multi-site with optional site parameter.",
+    description="Estatísticas de switches do controlador UniFi Network — métricas de performance, throughput de portas e utilização de uplinks para todos os switches gerenciados. Use quando precisar monitorar switches, analisar tráfego de portas ou diagnosticar conectividade. Retorna lista completa de métricas por switch no controlador UniFi.",
 )
 async def get_switch_stats(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -257,11 +285,16 @@ async def get_switch_stats(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert SwitchStats objects to plain dictionaries
         stats_raw = [s.raw if hasattr(s, "raw") else s for s in stats]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(stats_raw),
-            "switch_stats": stats_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(stats_raw),
+                "switch_stats": stats_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise

@@ -8,26 +8,25 @@ Supports multi-site operations with optional site parameter.
 
 import json
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
 from src.runtime import config, network_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry
-from src.utils.site_context import resolve_site_context, inject_site_metadata
-from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
-    InvalidSiteParameterError,
-)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_networks",
-    description="List all configured networks (LAN, WAN, VLAN-only) on the Unifi Network controller (V1 API based). Supports multi-site with optional site parameter.",
+    description="Redes configuradas no controlador UniFi Network — VLANs, LANs, segmentos corporativos e configurações de rede para isolamento de tráfego, segmentação ou separação de departamentos. Use quando precisar listar networks, auditar VLANs ou revisar segmentação. Retorna lista completa de redes com nome, subnet, VLAN ID e gateway no controlador UniFi.",
 )
 async def list_networks(site: Optional[str] = None) -> Dict[str, Any]:
     """Lists all networks configured on the UniFi Network controller for the specified site using the V1 API structure.
@@ -53,11 +52,16 @@ async def list_networks(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert Network objects to plain dictionaries
         networks_raw = [n.raw if hasattr(n, "raw") else n for n in networks]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(networks_raw),
-            "networks": networks_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(networks_raw),
+                "networks": networks_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -68,7 +72,7 @@ async def list_networks(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_network_details",
-    description="Get detailed information about a specific network by ID. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de rede UniFi Network específica — informações de VLAN, LAN, subnet e gateway identificados por ID único de segmento ou configuração de rede. Use quando precisar auditar network específica, validar VLAN ou revisar configuração de subnet. Retorna nome, VLAN ID, endereçamento IP e DHCP da rede no controlador UniFi.",
 )
 async def get_network_details(network_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -93,15 +97,25 @@ async def get_network_details(network_id: str, site: Optional[str] = None) -> Di
         network = await network_manager.get_network_details(network_id, site=site_slug)
         if network:
             network_raw = network.raw if hasattr(network, "raw") else network
-            return inject_site_metadata({
-                "success": True,
-                "network": network_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "network": network_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Network with ID {network_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Network with ID {network_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -112,11 +126,13 @@ async def get_network_details(network_id: str, site: Optional[str] = None) -> Di
 
 @server.tool(
     name="unifi_update_network",
-    description="Update specific fields of an existing network (LAN/VLAN). Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Atualização de rede UniFi Network via ID — modificação de nome, subnet, VLAN ID, gateway ou configuração DHCP com confirmação obrigatória. Use quando precisar ajustar network, modificar VLAN ou alterar endereçamento. Executa update parcial de configuração de rede no controlador UniFi com suporte multi-site.",
     permission_category="networks",
     permission_action="update",
 )
-async def update_network(network_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def update_network(
+    network_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for updating network with multi-site support.
 
@@ -182,17 +198,27 @@ async def update_network(network_id: str, update_data: Dict[str, Any], confirm: 
         if success:
             # Fetch updated details
             updated = await network_manager.get_network_details(network_id, site=site_slug)
-            return inject_site_metadata({
-                "success": True,
-                "network_id": network_id,
-                "updated_fields": list(validated_data.keys()),
-                "details": updated,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "network_id": network_id,
+                    "updated_fields": list(validated_data.keys()),
+                    "details": updated,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to update network {network_id}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to update network {network_id}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -203,11 +229,13 @@ async def update_network(network_id: str, update_data: Dict[str, Any], confirm: 
 
 @server.tool(
     name="unifi_create_network",
-    description="Create a new network (LAN/VLAN) with schema validation. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Criação de rede UniFi Network com validação — nova VLAN, LAN, segmento corporativo ou configuração de isolamento com confirmação obrigatória. Use quando precisar adicionar network, configurar VLAN ou implementar segmentação. Cria rede validada no controlador UniFi com suporte multi-site e DHCP.",
     permission_category="networks",
     permission_action="create",
 )
-async def create_network(network_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def create_network(
+    network_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for creating network with multi-site support.
 
@@ -251,16 +279,26 @@ async def create_network(network_data: Dict[str, Any], confirm: bool = False, si
         # Create the network
         result = await network_manager.create_network(validated_data, site=site_slug)
         if result:
-            return inject_site_metadata({
-                "success": True,
-                "network_id": result.get("_id"),
-                "details": result,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "network_id": result.get("_id"),
+                    "details": result,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": "Failed to create network",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": "Failed to create network",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -387,7 +425,7 @@ async def create_network(network_data: Dict[str, Any], confirm: bool = False, si
 
 @server.tool(
     name="unifi_list_wlans",
-    description="List all configured Wireless LANs (WLANs) on the Unifi Network controller.",
+    description="Redes wireless do controlador UniFi Network — SSIDs, WLANs e configurações de access points para conectividade WiFi, guest network ou redes corporativas sem fio. Use quando precisar listar WLANs, auditar SSIDs ou revisar wireless. Retorna lista completa de redes WiFi com nome, segurança, VLAN e banda no controlador UniFi.",
 )
 async def list_wlans() -> Dict[str, Any]:
     """Lists all WLANs (Wireless SSIDs) configured on the UniFi Network controller.
@@ -452,7 +490,10 @@ async def list_wlans() -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
-@server.tool(name="unifi_get_wlan_details", description="Get details for a specific WLAN by ID.")
+@server.tool(
+    name="unifi_get_wlan_details",
+    description="Detalhes completos de rede wireless UniFi Network específica — informações de SSID, WLAN, segurança e configuração de access point identificados por ID único. Use quando precisar auditar WLAN específica, validar WiFi ou revisar autenticação. Retorna nome, encryption, password e VLAN do SSID no controlador UniFi.",
+)
 async def get_wlan_details(wlan_id: str) -> Dict[str, Any]:
     """Gets the detailed configuration of a specific WLAN (SSID) by its ID.
 
@@ -510,7 +551,7 @@ async def get_wlan_details(wlan_id: str) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_update_wlan",
-    description="Update specific fields of an existing WLAN (SSID). Requires confirmation.",
+    description="Atualização de rede wireless UniFi Network via ID — modificação de nome, password, segurança, VLAN ou configuração de SSID com confirmação obrigatória. Use quando precisar ajustar WLAN, modificar WiFi ou alterar encryption. Executa update parcial de configuração wireless no controlador UniFi com suporte multi-site.",
     permission_category="wlans",
     permission_action="update",
 )
@@ -621,7 +662,7 @@ async def update_wlan(wlan_id: str, update_data: Dict[str, Any], confirm: bool =
 
 @server.tool(
     name="unifi_create_wlan",
-    description=("Create a new Wireless LAN (WLAN/SSID) with schema validation. Requires confirmation."),
+    description="Criação de rede wireless UniFi Network com validação — novo SSID, WLAN, guest network ou configuração WiFi corporativa com confirmação obrigatória. Use quando precisar adicionar WLAN, configurar WiFi ou implementar guest access. Cria rede wireless validada no controlador UniFi com suporte multi-site.",
     permission_category="wlans",
     permission_action="create",
 )

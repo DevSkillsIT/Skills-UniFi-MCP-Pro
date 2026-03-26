@@ -6,33 +6,79 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
+
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
 
 # Import the global FastMCP server instance, config, and managers
 from src.runtime import client_manager, config, server, system_manager
 from src.utils.confirmation import should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission
-from src.utils.site_context import resolve_site_context, inject_site_metadata
-from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
-    InvalidSiteParameterError,
-)
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
+    name="unifi_lookup_by_ip",
+    description="Clientes e dispositivos conectados no UniFi Network — busca reversa por endereço IP, identificação de equipamentos, hostname e MAC address. Use quando precisar localizar rapidamente um dispositivo, cliente ou aparelho pela rede sem consumir tokens excessivos. Retorna apenas campos essenciais (hostname, nome, MAC) otimizados para consultas ágeis no controlador UniFi.",
+)
+async def lookup_by_ip(ip_address: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """Lookup client by IP address - returns only essential fields to minimize token usage.
+
+    Args:
+        ip_address: IPv4 address to search for (e.g. '192.168.1.100').
+        site: Optional site name/slug. If None, uses current default site.
+    """
+    try:
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        client_obj = await client_manager.get_client_by_ip(ip_address)
+        if client_obj:
+            client_raw = client_obj.raw if hasattr(client_obj, "raw") else client_obj
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "ip": ip_address,
+                    "hostname": client_raw.get("hostname", ""),
+                    "name": client_raw.get("name", ""),
+                    "mac": client_raw.get("mac", ""),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": f"No client found with IP: {ip_address}",
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+    except Exception as e:
+        logger.error(f"Error looking up client by IP {ip_address}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
+@server.tool(
     name="unifi_list_clients",
-    description="List clients connected to the Unifi Network controller. Optimized for token efficiency with summary mode by default.",
+    description="Clientes, dispositivos conectados e equipamentos de rede no UniFi Network — lista completa de aparelhos ativos, estações wireless e dispositivos cabeados registrados no controlador. Use quando precisar visualizar clientes conectados, monitorar dispositivos na rede ou auditar equipamentos. Retorna lista otimizada com campos essenciais (MAC, IP, nome, hostname) para consultas eficientes no UniFi.",
 )
 async def list_clients(
     active_only: bool = False,
     summary: bool = True,
     limit: int = 50,
     include_details: bool = False,
-    site: Optional[str] = None
+    site: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Implementation for listing clients with token-efficient defaults.
@@ -46,17 +92,17 @@ async def list_clients(
 
     Returns:
         Dict with optimized client list and metadata
-        
+
     Note: Use summary=True for routine queries, include_details=True only when specific client details are needed.
     """
     try:
         # Enforce reasonable limits
         limit = min(max(1, limit), 200)
-        
+
         # Warn about high token usage
         if include_details and not summary:
             logger.warning("⚠️ High token usage: include_details=True without summary mode")
-        
+
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
@@ -81,14 +127,14 @@ async def list_clients(
                     "is_wired": client.get("is_wired", False),
                     "oui": client.get("oui", ""),
                 }
-                
+
                 # Add minimal connection info
                 if client.get("is_wired", False):
                     client_summary["connection_type"] = "wired"
                 else:
                     client_summary["connection_type"] = "wireless"
                     client_summary["wifi_ssid"] = client.get("essid", "Unknown")
-                
+
                 clients_optimized.append(client_summary)
         else:
             # Full details (high token usage - user explicitly requested)
@@ -104,34 +150,39 @@ async def list_clients(
                 "active_only": active_only,
                 "summary_mode": summary,
                 "limit_applied": limit,
-                "include_details": include_details
+                "include_details": include_details,
             },
-            "token_usage": "optimized" if summary else "high"
+            "token_usage": "optimized" if summary else "high",
         }
-        
+
         # Add warning for large responses
         if len(clients_optimized) > 100 and not summary:
-            result["warning"] = f"Large response ({len(clients_optimized)} clients). Consider using summary=True for token efficiency."
-        
+            result["warning"] = (
+                f"Large response ({len(clients_optimized)} clients). Consider using summary=True for token efficiency."
+            )
+
         return inject_site_metadata(result, site_id, site_name, site_slug)
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
     except Exception as e:
         logger.error(f"Error listing clients: {e}", exc_info=True)
-        return inject_site_metadata({
-            "success": False,
-            "error": str(e),
-            "clients": [],
-            "count": 0,
-        }, site_id if 'site_id' in locals() else None, 
-           site_name if 'site_name' in locals() else None, 
-           site_slug if 'site_slug' in locals() else None)
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": str(e),
+                "clients": [],
+                "count": 0,
+            },
+            site_id if "site_id" in locals() else None,
+            site_name if "site_name" in locals() else None,
+            site_slug if "site_slug" in locals() else None,
+        )
 
 
 @server.tool(
     name="unifi_get_client_details",
-    description="Get detailed information about a specific client by MAC address. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de cliente ou dispositivo específico no UniFi Network — informações técnicas detalhadas de equipamentos, aparelhos e estações conectadas identificadas por MAC address. Use quando precisar dados completos de um cliente, investigar dispositivo específico ou auditar equipamento individual no controlador UniFi. Retorna informações detalhadas incluindo conexão, status e histórico.",
 )
 async def get_client_details(mac_address: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -156,15 +207,25 @@ async def get_client_details(mac_address: str, site: Optional[str] = None) -> Di
         client = await client_manager.get_client_details(mac_address, site=site_slug)
         if client:
             client_raw = client.raw if hasattr(client, "raw") else client
-            return inject_site_metadata({
-                "success": True,
-                "client": client_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "client": client_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client with MAC {mac_address} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client with MAC {mac_address} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -175,7 +236,7 @@ async def get_client_details(mac_address: str, site: Optional[str] = None) -> Di
 
 @server.tool(
     name="unifi_list_blocked_clients",
-    description="List clients/devices that are currently blocked from the network. Supports multi-site with optional site parameter.",
+    description="Clientes bloqueados e dispositivos banidos no UniFi Network — lista completa de equipamentos, aparelhos e estações com acesso negado à rede pelo controlador. Use quando precisar auditar bloqueios ativos, revisar dispositivos banidos ou gerenciar restrições de acesso no UniFi. Retorna lista de clientes bloqueados com MAC, nome, hostname, IP e timestamp do bloqueio.",
 )
 async def list_blocked_clients(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -201,21 +262,28 @@ async def list_blocked_clients(site: Optional[str] = None) -> Dict[str, Any]:
         formatted_clients = []
         for c in clients:
             client = c.raw if hasattr(c, "raw") else c
-            formatted_clients.append({
-                "mac": client.get("mac"),
-                "name": client.get("name") or client.get("hostname", "Unknown"),
-                "hostname": client.get("hostname", "Unknown"),
-                "ip": client.get("ip", "Unknown"),
-                "connection_type": "Wired" if client.get("is_wired", False) else "Wireless",
-                "blocked_since": client.get("blocked_since", 0),
-                "_id": client.get("_id"),
-            })
+            formatted_clients.append(
+                {
+                    "mac": client.get("mac"),
+                    "name": client.get("name") or client.get("hostname", "Unknown"),
+                    "hostname": client.get("hostname", "Unknown"),
+                    "ip": client.get("ip", "Unknown"),
+                    "connection_type": "Wired" if client.get("is_wired", False) else "Wireless",
+                    "blocked_since": client.get("blocked_since", 0),
+                    "_id": client.get("_id"),
+                }
+            )
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(formatted_clients),
-            "blocked_clients": formatted_clients,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(formatted_clients),
+                "blocked_clients": formatted_clients,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -226,7 +294,7 @@ async def list_blocked_clients(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_block_client",
-    description="Block a client/device from the network by MAC address. Supports multi-site with optional site parameter.",
+    description="Bloqueio de cliente ou dispositivo na rede UniFi Network — nega acesso à rede para equipamentos, aparelhos e estações específicas identificadas por MAC address no controlador. Use quando precisar bloquear dispositivo indesejado, banir equipamento não autorizado ou restringir acesso de cliente específico à rede UniFi. Requer confirmação antes de aplicar o bloqueio permanente.",
     permission_category="clients",
     permission_action="update",
 )
@@ -259,10 +327,15 @@ async def block_client(mac_address: str, confirm: bool = False, site: Optional[s
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -284,14 +357,24 @@ async def block_client(mac_address: str, confirm: bool = False, site: Optional[s
 
         success = await client_manager.block_client(mac_address, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Client {mac_address} blocked successfully.",
-            }, site_id, site_name, site_slug)
-        return inject_site_metadata({
-            "success": False,
-            "error": f"Failed to block client {mac_address}.",
-        }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Client {mac_address} blocked successfully.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": f"Failed to block client {mac_address}.",
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -302,7 +385,7 @@ async def block_client(mac_address: str, confirm: bool = False, site: Optional[s
 
 @server.tool(
     name="unifi_unblock_client",
-    description="Unblock a previously blocked client/device by MAC address. Supports multi-site with optional site parameter.",
+    description="Desbloqueio de cliente ou dispositivo previamente banido no UniFi Network — restaura acesso à rede para equipamentos, aparelhos e estações bloqueadas identificadas por MAC address. Use quando precisar liberar dispositivo bloqueado, restaurar acesso de equipamento banido ou remover restrições de cliente no controlador UniFi. Requer confirmação antes de remover o bloqueio.",
     permission_category="clients",
     permission_action="update",
 )
@@ -335,10 +418,15 @@ async def unblock_client(mac_address: str, confirm: bool = False, site: Optional
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -360,14 +448,24 @@ async def unblock_client(mac_address: str, confirm: bool = False, site: Optional
 
         success = await client_manager.unblock_client(mac_address, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Client {mac_address} unblocked successfully.",
-            }, site_id, site_name, site_slug)
-        return inject_site_metadata({
-            "success": False,
-            "error": f"Failed to unblock client {mac_address}.",
-        }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Client {mac_address} unblocked successfully.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": f"Failed to unblock client {mac_address}.",
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -378,9 +476,11 @@ async def unblock_client(mac_address: str, confirm: bool = False, site: Optional
 
 @server.tool(
     name="unifi_rename_client",
-    description="Rename a client/device in the Unifi Network controller by MAC address",
+    description="Renomear cliente ou dispositivo no UniFi Network — altera identificação de equipamentos, aparelhos e estações conectadas no controlador usando MAC address como referência. Use quando precisar organizar nomenclatura de dispositivos, identificar equipamentos de forma amigável ou padronizar nomes de clientes na rede UniFi. Requer confirmação antes de aplicar a alteração de nome.",
 )
-async def rename_client(mac_address: str, name: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def rename_client(
+    mac_address: str, name: str, confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Implementation for renaming a client with multi-site support."""
     if not parse_permission(config.permissions, "client", "update"):
         logger.warning(f"Permission denied for renaming client ({mac_address}).")
@@ -389,14 +489,19 @@ async def rename_client(mac_address: str, name: str, confirm: bool = False, site
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        
+
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         current_name = client.get("name") or client.get("hostname", "Unknown")
@@ -413,17 +518,27 @@ async def rename_client(mac_address: str, name: str, confirm: bool = False, site
 
         success = await client_manager.rename_client(mac_address, name, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Client {mac_address} renamed to '{name}' successfully.",
-                "client_id": mac_address,
-                "new_name": name,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Client {mac_address} renamed to '{name}' successfully.",
+                    "client_id": mac_address,
+                    "new_name": name,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to rename client {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to rename client {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -434,7 +549,7 @@ async def rename_client(mac_address: str, name: str, confirm: bool = False, site
 
 @server.tool(
     name="unifi_force_reconnect_client",
-    description="Force a client to reconnect to the network (kick) by MAC address",
+    description="Reconexão forçada de cliente ou dispositivo no UniFi Network — desconecta e força equipamento, aparelho ou estação a reconectar à rede (kick) usando MAC address. Use quando precisar resolver problemas de conexão, forçar renovação DHCP ou liberar sessão travada de dispositivo no controlador UniFi. Requer confirmação antes de desconectar o cliente.",
     permission_category="clients",
     permission_action="update",
 )
@@ -450,14 +565,19 @@ async def force_reconnect_client(mac_address: str, confirm: bool = False, site: 
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        
+
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -476,16 +596,26 @@ async def force_reconnect_client(mac_address: str, confirm: bool = False, site: 
 
         success = await client_manager.force_reconnect_client(mac_address, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Client {mac_address} forced to reconnect successfully.",
-                "client_id": mac_address,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Client {mac_address} forced to reconnect successfully.",
+                    "client_id": mac_address,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to force reconnect client {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to force reconnect client {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -496,7 +626,7 @@ async def force_reconnect_client(mac_address: str, confirm: bool = False, site: 
 
 @server.tool(
     name="unifi_authorize_guest",
-    description="Authorize a guest client to access the guest network by MAC address",
+    description="Autorização de visitante ou convidado na rede guest do UniFi Network — concede acesso temporário para dispositivos, equipamentos e aparelhos de visitantes identificados por MAC address. Use quando precisar autorizar acesso guest, liberar dispositivo de visitante ou conceder permissão temporária no portal captivo do UniFi. Permite configurar tempo de acesso, cota de dados e limites de velocidade.",
     permission_category="clients",
     permission_action="update",
 )
@@ -517,14 +647,19 @@ async def authorize_guest(
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        
+
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -556,19 +691,31 @@ async def authorize_guest(
                 "message": f"Will authorize guest '{client_name}' for {minutes} minutes. Set confirm=true to execute.",
             }
 
-        success = await client_manager.authorize_guest(mac_address, minutes, up_kbps, down_kbps, bytes_quota, site=site_slug)
+        success = await client_manager.authorize_guest(
+            mac_address, minutes, up_kbps, down_kbps, bytes_quota, site=site_slug
+        )
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Guest {mac_address} authorized successfully for {minutes} minutes.",
-                "client_id": mac_address,
-                "authorized_minutes": minutes,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Guest {mac_address} authorized successfully for {minutes} minutes.",
+                    "client_id": mac_address,
+                    "authorized_minutes": minutes,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to authorize guest {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to authorize guest {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -579,7 +726,7 @@ async def authorize_guest(
 
 @server.tool(
     name="unifi_unauthorize_guest",
-    description="Revoke authorization for a guest client by MAC address",
+    description="Revogação de autorização de visitante ou convidado no UniFi Network — remove acesso guest para dispositivos, equipamentos e aparelhos de visitantes identificados por MAC address. Use quando precisar revogar acesso temporário, encerrar sessão de visitante ou remover permissão de dispositivo guest no portal captivo do controlador UniFi. Requer confirmação antes de revogar autorização.",
     permission_category="clients",
     permission_action="update",
 )
@@ -592,14 +739,19 @@ async def unauthorize_guest(mac_address: str, confirm: bool = False, site: Optio
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        
+
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -625,16 +777,26 @@ async def unauthorize_guest(mac_address: str, confirm: bool = False, site: Optio
 
         success = await client_manager.unauthorize_guest(mac_address, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"Guest {mac_address} unauthorized successfully.",
-                "client_id": mac_address,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Guest {mac_address} unauthorized successfully.",
+                    "client_id": mac_address,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to unauthorize guest {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to unauthorize guest {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -645,13 +807,7 @@ async def unauthorize_guest(mac_address: str, confirm: bool = False, site: Optio
 
 @server.tool(
     name="unifi_set_client_ip_settings",
-    description="""Set fixed IP address and/or local DNS record for a client device.
-
-Allows configuring:
-- Fixed IP: Assign a static IP address to a client (DHCP reservation)
-- Local DNS: Create a local DNS hostname for the client (UniFi Network 7.2+)
-
-Either setting can be enabled/disabled independently.""",
+    description="Configuração de IP fixo e DNS local para cliente ou dispositivo no UniFi Network — define reserva DHCP estática e registro DNS local para equipamentos, aparelhos e estações identificadas por MAC address. Use quando precisar fixar IP de dispositivo, criar hostname local ou configurar DNS interno no controlador UniFi. Permite configurar IP fixo e registro DNS de forma independente (UniFi Network 7.2+).",
     permission_category="clients",
     permission_action="update",
 )
@@ -682,14 +838,19 @@ async def set_client_ip_settings(
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        
+
         # Fetch client details first
         client_obj = await client_manager.get_client_details(mac_address, site=site_slug)
         if not client_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Client not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Client not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         client = client_obj.raw if hasattr(client_obj, "raw") else client_obj
         client_name = client.get("name") or client.get("hostname", "Unknown")
@@ -732,24 +893,34 @@ async def set_client_ip_settings(
             site=site_slug,
         )
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"IP settings updated for client {mac_address}.",
-                "settings": {
-                    k: v
-                    for k, v in {
-                        "use_fixedip": use_fixedip,
-                        "fixed_ip": fixed_ip,
-                        "local_dns_record_enabled": local_dns_record_enabled,
-                        "local_dns_record": local_dns_record,
-                    }.items()
-                    if v is not None
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"IP settings updated for client {mac_address}.",
+                    "settings": {
+                        k: v
+                        for k, v in {
+                            "use_fixedip": use_fixedip,
+                            "fixed_ip": fixed_ip,
+                            "local_dns_record_enabled": local_dns_record_enabled,
+                            "local_dns_record": local_dns_record,
+                        }.items()
+                        if v is not None
+                    },
                 },
-            }, site_id, site_name, site_slug)
-        return inject_site_metadata({
-            "success": False,
-            "error": f"Failed to update IP settings for client {mac_address}.",
-        }, site_id, site_name, site_slug)
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": f"Failed to update IP settings for client {mac_address}.",
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise

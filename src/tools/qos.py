@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 @server.tool(
     name="unifi_list_qos_rules",
-    description="List all QoS rules on the Unifi Network controller for the current site.",
+    description="Regras de QoS do controlador UniFi Network — políticas de qualidade de serviço, priorização de tráfego e limites de banda configurados para controle de performance, bandwidth e latência. Use quando precisar listar QoS rules, auditar priorização ou revisar bandwidth limits. Retorna lista completa de regras com nome, status, direção e limites no controlador UniFi.",
 )
 async def list_qos_rules() -> Dict[str, Any]:
     """Lists all Quality of Service (QoS) rules configured for the current UniFi site.
@@ -76,7 +76,7 @@ async def list_qos_rules() -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_qos_rule_details",
-    description="Get details for a specific QoS rule by ID.",
+    description="Detalhes completos de regra de QoS UniFi Network específica — informações de política de qualidade de serviço, priorização de tráfego e limites de banda identificados por ID único. Use quando precisar auditar QoS rule específica, validar priorização ou revisar configuração de bandwidth. Retorna nome, interface, direção, limite e DSCP da QoS rule no controlador UniFi.",
 )
 async def get_qos_rule_details(rule_id: str) -> Dict[str, Any]:
     """Gets the detailed configuration of a specific QoS rule by its ID.
@@ -139,7 +139,7 @@ async def get_qos_rule_details(rule_id: str) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_toggle_qos_rule_enabled",  # Renamed from update_qos_rule_state
-    description="Enable or disable a specific QoS rule by ID. Requires confirmation.",
+    description="Habilitação/desabilitação de regra de QoS UniFi Network via ID — alternância de estado de política de qualidade de serviço sem remoção permanente. Use quando precisar ativar/desativar QoS rule temporariamente, pausar priorização ou suspender limite de banda. Executa toggle de regra de QoS no controlador UniFi com confirmação obrigatória.",
     permission_category="qos_rules",
     permission_action="update",
 )
@@ -237,7 +237,7 @@ async def toggle_qos_rule_enabled(rule_id: str, confirm: bool = False) -> Dict[s
 # --- NEW UPDATE QOS RULE TOOL ---
 @server.tool(
     name="unifi_update_qos_rule",
-    description="Update specific fields of an existing QoS rule. Requires confirmation.",
+    description="Atualização de regra de QoS UniFi Network via ID — modificação de nome, interface, direção, limite de banda ou valor DSCP com confirmação obrigatória. Use quando precisar ajustar QoS rule, modificar priorização ou alterar bandwidth limit. Executa update parcial de regra de QoS no controlador UniFi com suporte multi-site.",
     permission_category="qos_rules",
     permission_action="update",
 )
@@ -347,7 +347,7 @@ async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bo
 
 @server.tool(
     name="unifi_create_qos_rule",
-    description="Create a new QoS rule on the Unifi Network controller. Requires confirmation.",
+    description="Criação de regra de QoS UniFi Network com validação — nova política de qualidade de serviço, priorização de tráfego ou limite de banda com confirmação obrigatória. Use quando precisar adicionar QoS rule, configurar priorização ou implementar bandwidth limit. Cria regra de QoS validada no controlador UniFi com suporte multi-site.",
     permission_category="qos_rules",
     permission_action="create",
 )
@@ -448,7 +448,7 @@ async def create_qos_rule(
 
 @server.tool(
     name="unifi_create_simple_qos_rule",
-    description=("Create a QoS rule using a simplified high-level schema. Returns a preview unless confirm=true."),
+    description="Criação simplificada de regra de QoS UniFi Network — nova política de qualidade de serviço via schema compacto com preview automático e confirmação obrigatória. Use quando precisar criar QoS rule rapidamente, configurar priorização básica ou implementar limite simples. Cria regra de QoS com schema simplificado no controlador UniFi.",
     permission_category="qos_rules",
     permission_action="create",
 )

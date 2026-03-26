@@ -7,26 +7,25 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
 from src.runtime import config, hotspot_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry
-from src.utils.site_context import resolve_site_context, inject_site_metadata
-from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
-    InvalidSiteParameterError,
-)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_hotspot_configs",
-    description="List all hotspot configurations on the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Configurações de hotspot do controlador UniFi Network — perfis de autenticação, portal captivo e parâmetros de acesso para rede de convidados. Use quando precisar listar guest network, revisar portais ou auditar autenticação. Retorna lista completa de hotspot configs com nome, tipo e settings no controlador UniFi.",
 )
 async def list_hotspot_configs(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -52,11 +51,16 @@ async def list_hotspot_configs(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert HotspotConfig objects to plain dictionaries
         configs_raw = [c.raw if hasattr(c, "raw") else c for c in configs]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(configs_raw),
-            "hotspot_configs": configs_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(configs_raw),
+                "hotspot_configs": configs_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -67,7 +71,7 @@ async def list_hotspot_configs(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_hotspot_config_details",
-    description="Get detailed information about a specific hotspot configuration by ID. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de configuração de hotspot UniFi Network específica — informações de perfil de autenticação, portal captivo ou parâmetros de acesso identificados por ID único. Use quando precisar auditar config específica ou validar autenticação. Retorna nome, tipo, settings e parâmetros do hotspot no controlador UniFi.",
 )
 async def get_hotspot_config_details(config_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -92,15 +96,25 @@ async def get_hotspot_config_details(config_id: str, site: Optional[str] = None)
         config = await hotspot_manager.get_hotspot_config_details(config_id, site=site_slug)
         if config:
             config_raw = config.raw if hasattr(config, "raw") else config
-            return inject_site_metadata({
-                "success": True,
-                "hotspot_config": config_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "hotspot_config": config_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Hotspot configuration with ID {config_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Hotspot configuration with ID {config_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -111,11 +125,13 @@ async def get_hotspot_config_details(config_id: str, site: Optional[str] = None)
 
 @server.tool(
     name="unifi_create_hotspot_config",
-    description="Create a new hotspot configuration with validation. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Criação de configuração de hotspot UniFi Network com validação — novo perfil de autenticação, portal ou parâmetros de acesso com confirmação obrigatória. Use quando precisar adicionar guest network, configurar portal ou implementar autenticação. Cria hotspot config validado no controlador UniFi com suporte multi-site.",
     permission_category="hotspot",
     permission_action="create",
 )
-async def create_hotspot_config(config_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def create_hotspot_config(
+    config_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for creating hotspot configuration with multi-site support.
 
@@ -159,16 +175,26 @@ async def create_hotspot_config(config_data: Dict[str, Any], confirm: bool = Fal
         # Create the hotspot configuration
         result = await hotspot_manager.create_hotspot_config(validated_data, site=site_slug)
         if result:
-            return inject_site_metadata({
-                "success": True,
-                "config_id": result.get("_id"),
-                "details": result,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "config_id": result.get("_id"),
+                    "details": result,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": "Failed to create hotspot configuration",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": "Failed to create hotspot configuration",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -179,11 +205,13 @@ async def create_hotspot_config(config_data: Dict[str, Any], confirm: bool = Fal
 
 @server.tool(
     name="unifi_update_hotspot_config",
-    description="Update a hotspot configuration by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Atualização de configuração de hotspot UniFi Network via ID — modificação de campos de perfil de autenticação, portal ou parâmetros de acesso com confirmação obrigatória. Use quando precisar ajustar guest network ou modificar portal. Executa update parcial de hotspot config no controlador UniFi com suporte multi-site.",
     permission_category="hotspot",
     permission_action="update",
 )
-async def update_hotspot_config(config_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def update_hotspot_config(
+    config_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for updating hotspot configuration with multi-site support.
 
@@ -239,17 +267,27 @@ async def update_hotspot_config(config_id: str, update_data: Dict[str, Any], con
         if success:
             # Fetch updated details
             updated = await hotspot_manager.get_hotspot_config_details(config_id, site=site_slug)
-            return inject_site_metadata({
-                "success": True,
-                "config_id": config_id,
-                "updated_fields": list(validated_data.keys()),
-                "details": updated,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "config_id": config_id,
+                    "updated_fields": list(validated_data.keys()),
+                    "details": updated,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to update hotspot configuration {config_id}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to update hotspot configuration {config_id}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise

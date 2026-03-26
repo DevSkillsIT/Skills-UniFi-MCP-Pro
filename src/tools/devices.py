@@ -6,34 +6,29 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
 print("🔍 [DEBUG] devices.py module loading...")
 
-from src.runtime import config, device_manager, server, system_manager
-from src.utils.confirmation import create_preview, preview_response, should_auto_confirm, toggle_preview, update_preview
-from src.utils.permissions import parse_permission
-from src.utils.site_context import resolve_site_context, inject_site_metadata
 from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
     InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
 )
+from src.runtime import device_manager, server, system_manager
+from src.utils.confirmation import create_preview, should_auto_confirm
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_devices",
-    description="List devices adopted by the Unifi Network controller. Optimized for token efficiency with summary mode by default.",
+    description="Equipamentos de rede UniFi Network adotados pelo controlador — lista completa de access points, switches, gateways e PDUs gerenciados. Use quando precisar visualizar dispositivos de infraestrutura, auditar hardware ou monitorar equipamentos da rede UniFi. Retorna lista otimizada com campos essenciais (nome, tipo, status, IP, modelo) para consultas eficientes no controlador UniFi.",
 )
 async def list_devices(
-    device_type: str = "all",
-    summary: bool = True,
-    limit: int = 20,
-    site: Optional[str] = None
+    device_type: str = "all", summary: bool = True, limit: int = 20, site: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Implementation for listing devices with token-efficient defaults.
@@ -49,10 +44,10 @@ async def list_devices(
     """
     try:
         print("🔍 [DEBUG] list_devices() starting...")
-        
+
         # Enforce reasonable limits
         limit = min(max(1, limit), 100)
-        
+
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
         print(f"🔍 [DEBUG] Resolved site: {site_slug}")
@@ -103,32 +98,32 @@ async def list_devices(
                 "summary_mode": summary,
                 "limit_applied": limit,
             },
-            "token_usage": "optimized" if summary else "high"
+            "token_usage": "optimized" if summary else "high",
         }
-        
+
         print(f"🔍 [DEBUG] Returning {len(devices_optimized)} devices")
         return inject_site_metadata(result, site_id, site_name, site_slug)
-        
+
     except Exception as e:
         logger.error(f"🔍 [DEBUG] Error in list_devices: {e}", exc_info=True)
-        return inject_site_metadata({
-            "success": False,
-            "error": str(e),
-            "devices": [],
-            "count": 0,
-        }, site_id if 'site_id' in locals() else None, 
-           site_name if 'site_name' in locals() else None, 
-           site_slug if 'site_slug' in locals() else None)
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": str(e),
+                "devices": [],
+                "count": 0,
+            },
+            site_id if "site_id" in locals() else None,
+            site_name if "site_name" in locals() else None,
+            site_slug if "site_slug" in locals() else None,
+        )
 
 
 @server.tool(
     name="unifi_get_device_details",
-    description="Get detailed information for a specific device by MAC address. Supports multi-site with optional site parameter.",
+    description="Informações detalhadas de equipamento UniFi Network específico — busca por endereço MAC com dados completos de dispositivo, hardware, firmware e status operacional. Use quando precisar diagnóstico aprofundado de access point, switch, gateway ou aparelho gerenciado. Retorna modelo, IP, uptime, versão e métricas específicas do equipamento no controlador UniFi.",
 )
-async def get_device_details(
-    mac_address: str,
-    site: Optional[str] = None
-) -> Dict[str, Any]:
+async def get_device_details(mac_address: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
     Implementation for getting device details with multi-site support.
 
@@ -150,11 +145,16 @@ async def get_device_details(
 
         device_obj = await device_manager.get_device_details(mac_address, site=site_slug)
         if not device_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Device not found with MAC address: {mac_address}",
-                "device": None,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Device not found with MAC address: {mac_address}",
+                    "device": None,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         # Convert Device object to plain dictionary
         device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
@@ -182,7 +182,9 @@ async def get_device_details(
             "status": device_status_str,
             "uptime": str(timedelta(seconds=device_raw.get("uptime", 0))) if device_raw.get("uptime") else "N/A",
             "last_seen": (
-                datetime.fromtimestamp(device_raw.get("last_seen", 0)).isoformat() if device_raw.get("last_seen") else "N/A"
+                datetime.fromtimestamp(device_raw.get("last_seen", 0)).isoformat()
+                if device_raw.get("last_seen")
+                else "N/A"
             ),
             "firmware": device_raw.get("version", ""),
             "adopted": device_raw.get("adopted", False),
@@ -206,24 +208,27 @@ async def get_device_details(
         }
 
         return inject_site_metadata(result, site_id, site_name, site_slug)
-        
+
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
     except Exception as e:
         logger.error(f"Error getting device details: {e}", exc_info=True)
-        return inject_site_metadata({
-            "success": False,
-            "error": str(e),
-            "device": None,
-        }, site_id if 'site_id' in locals() else None, 
-           site_name if 'site_name' in locals() else None, 
-           site_slug if 'site_slug' in locals() else None)
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": str(e),
+                "device": None,
+            },
+            site_id if "site_id" in locals() else None,
+            site_name if "site_name" in locals() else None,
+            site_slug if "site_slug" in locals() else None,
+        )
 
 
 @server.tool(
     name="unifi_reboot_device",
-    description="Reboot a specific device by MAC address. Supports multi-site with optional site parameter.",
+    description="Reinicialização de dispositivo UniFi Network via endereço MAC — reboot remoto de equipamento, access point, switch ou gateway com confirmação de segurança. Use quando precisar reiniciar hardware com problemas ou aplicar configurações. Executa restart controlado do dispositivo no controlador UniFi com validação multi-site.",
     permission_category="devices",
     permission_action="update",
 )
@@ -251,10 +256,15 @@ async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[
         # Get device details first to verify it exists
         device_obj = await device_manager.get_device_details(mac_address, site=site_slug)
         if not device_obj:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Device not found with MAC address: {mac_address}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Device not found with MAC address: {mac_address}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
         device_name = device_raw.get("name", "Unknown Device")
@@ -262,16 +272,19 @@ async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[
         # Create preview for confirmation
         if not confirm and not should_auto_confirm():
             preview = create_preview(
-                action="reboot",
-                target=f"device '{device_name}' ({mac_address})",
-                site=site_name or site_slug
+                action="reboot", target=f"device '{device_name}' ({mac_address})", site=site_name or site_slug
             )
-            return inject_site_metadata({
-                "success": False,
-                "requires_confirmation": True,
-                "preview": preview,
-                "message": "Please confirm the device reboot operation"
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "requires_confirmation": True,
+                    "preview": preview,
+                    "message": "Please confirm the device reboot operation",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         # Execute reboot
         success = await device_manager.reboot_device(mac_address, site=site_slug)
@@ -289,23 +302,26 @@ async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[
             result["error"] = f"Failed to reboot device '{device_name}'"
 
         return inject_site_metadata(result, site_id, site_name, site_slug)
-        
+
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
     except Exception as e:
         logger.error(f"Error rebooting device: {e}", exc_info=True)
-        return inject_site_metadata({
-            "success": False,
-            "error": str(e),
-        }, site_id if 'site_id' in locals() else None, 
-           site_name if 'site_name' in locals() else None, 
-           site_slug if 'site_slug' in locals() else None)
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": str(e),
+            },
+            site_id if "site_id" in locals() else None,
+            site_name if "site_name" in locals() else None,
+            site_slug if "site_slug" in locals() else None,
+        )
 
 
 @server.tool(
     name="unifi_adopt_device",
-    description="Adopt a pending device into the Unifi Network by MAC address. Supports multi-site with optional site parameter.",
+    description="Adoção de equipamento UniFi Network pendente via endereço MAC — integração de dispositivo, access point, switch ou gateway novo ao controlador com confirmação de segurança. Use quando precisar adicionar hardware detectado, incorporar aparelho à infraestrutura ou gerenciar equipamentos não adotados. Executa adoption no controlador UniFi com validação multi-site.",
     permission_category="devices",
     permission_action="create",
 )
@@ -333,16 +349,19 @@ async def adopt_device(mac_address: str, confirm: bool = False, site: Optional[s
         # Create preview for confirmation
         if not confirm and not should_auto_confirm():
             preview = create_preview(
-                action="adopt",
-                target=f"device with MAC {mac_address}",
-                site=site_name or site_slug
+                action="adopt", target=f"device with MAC {mac_address}", site=site_name or site_slug
             )
-            return inject_site_metadata({
-                "success": False,
-                "requires_confirmation": True,
-                "preview": preview,
-                "message": "Please confirm the device adoption operation"
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "requires_confirmation": True,
+                    "preview": preview,
+                    "message": "Please confirm the device adoption operation",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
         # Execute adoption
         success = await device_manager.adopt_device(mac_address, site=site_slug)
@@ -359,15 +378,18 @@ async def adopt_device(mac_address: str, confirm: bool = False, site: Optional[s
             result["error"] = f"Failed to adopt device with MAC {mac_address}"
 
         return inject_site_metadata(result, site_id, site_name, site_slug)
-        
+
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
     except Exception as e:
         logger.error(f"Error adopting device: {e}", exc_info=True)
-        return inject_site_metadata({
-            "success": False,
-            "error": str(e),
-        }, site_id if 'site_id' in locals() else None, 
-           site_name if 'site_name' in locals() else None, 
-           site_slug if 'site_slug' in locals() else None)
+        return inject_site_metadata(
+            {
+                "success": False,
+                "error": str(e),
+            },
+            site_id if "site_id" in locals() else None,
+            site_name if "site_name" in locals() else None,
+            site_slug if "site_slug" in locals() else None,
+        )

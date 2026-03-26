@@ -4,23 +4,18 @@ Firewall policy tools for Unifi Network MCP server.
 
 import json
 import logging
+import os
 from typing import Any, Dict, Optional
 
 from src.runtime import config, firewall_manager, network_manager, server
 from src.utils.confirmation import create_preview, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission  # CORRECTED import name
 from src.utils.site_resolver import (
-    validate_site_parameter,
     resolve_site_identifier,
     validate_site_access,
-)
-from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
-    InvalidSiteParameterError,
+    validate_site_parameter,
 )
 from src.validator_registry import UniFiValidatorRegistry  # Added
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -76,12 +71,9 @@ async def _resolve_site_context(site: Optional[str]) -> Optional[str]:
 
 @server.tool(
     name="unifi_list_firewall_policies",
-    description="List firewall policies configured on the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Políticas de firewall do controlador UniFi Network — regras de segurança, filtros de tráfego e controles de acesso configurados para proteção da rede. Use quando precisar auditar configurações de firewall, revisar permissões de tráfego ou gerenciar proteção de perímetro. Retorna lista de regras ativas com ação, ruleset e índice no controlador UniFi.",
 )
-async def list_firewall_policies(
-    include_predefined: bool = False,
-    site: Optional[str] = None
-) -> Dict[str, Any]:
+async def list_firewall_policies(include_predefined: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
     """
     Lists firewall policies for the current or specified UniFi site.
 
@@ -172,7 +164,7 @@ async def list_firewall_policies(
 
 @server.tool(
     name="unifi_get_firewall_policy_details",
-    description="Get detailed configuration for a specific firewall policy by ID.",
+    description="Configuração detalhada de política de firewall UniFi Network específica — informações completas de regra, filtro ou controle de segurança identificado por ID único. Use quando precisar auditar configuração específica ou validar regra de proteção. Retorna ação, ruleset, protocolo, endereços e parâmetros da política no controlador UniFi.",
 )
 async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
     """
@@ -242,7 +234,7 @@ async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_toggle_firewall_policy",
-    description="Enable or disable a specific firewall policy by ID.",
+    description="Alternância de estado de política de firewall UniFi Network via ID — ativação ou desativação de regra, filtro ou controle de segurança com confirmação obrigatória. Use quando precisar habilitar proteção temporariamente, desabilitar regra específica ou gerenciar estado de filtros. Executa toggle de política no controlador UniFi alterando enabled/disabled.",
     permission_category="firewall_policies",
     permission_action="update",
 )
@@ -342,14 +334,12 @@ async def toggle_firewall_policy(policy_id: str, confirm: bool = False) -> Dict[
 
 @server.tool(
     name="unifi_create_firewall_policy",
-    description="Create a new firewall policy with schema validation. Supports multi-site with optional site parameter.",
+    description="Criação de política de firewall UniFi Network com validação de schema — nova regra, filtro ou controle de segurança com confirmação obrigatória. Use quando precisar adicionar proteção personalizada, implementar bloqueio específico ou configurar permissão de tráfego. Executa validação e cria política no controlador UniFi com suporte multi-site.",
     permission_category="firewall_policies",
     permission_action="create",
 )
 async def create_firewall_policy(
-    policy_data: Dict[str, Any],
-    confirm: bool = False,
-    site: Optional[str] = None
+    policy_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Creates a new firewall policy based on the provided configuration data.
@@ -465,7 +455,9 @@ async def create_firewall_policy(
             "reject",
         ]:
             # This check might be redundant if the validator enforces enum values
-            error = f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
+            error = (
+                f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
+            )
             logger.warning(error)
             return {"success": False, "error": error}
         validated_data["action"] = action.lower()  # Normalize in the validated data
@@ -522,15 +514,12 @@ async def create_firewall_policy(
 
 @server.tool(
     name="unifi_update_firewall_policy",
-    description="Update specific fields of an existing firewall policy by ID. Supports multi-site with optional site parameter.",
+    description="Atualização de política de firewall UniFi Network existente via ID — modificação de campos específicos de regra, filtro ou controle de segurança com confirmação obrigatória. Use quando precisar ajustar proteção, modificar parâmetros de bloqueio ou atualizar permissão de tráfego. Executa update parcial de política no controlador UniFi com suporte multi-site.",
     permission_category="firewall_policies",
     permission_action="update",
 )
 async def update_firewall_policy(
-    policy_id: str,
-    update_data: Dict[str, Any],
-    confirm: bool = False,
-    site: Optional[str] = None
+    policy_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Updates specific fields of an existing firewall policy. Requires confirmation.
@@ -686,10 +675,7 @@ async def update_firewall_policy(
 
 @server.tool(
     name="unifi_create_simple_firewall_policy",
-    description=(
-        "Create a firewall policy using a simplified high-level schema. "
-        "Accepts friendly src/dst selectors and returns a preview unless confirm=true."
-    ),
+    description="Criação simplificada de política de firewall UniFi Network com schema de alto nível — nova regra ou filtro usando seletores amigáveis src/dst e preview antes da confirmação. Use quando precisar adicionar proteção rapidamente ou configurar bloqueio simples. Retorna preview expandido ou cria política no controlador UniFi com validação automática.",
     permission_category="firewall_policies",
     permission_action="create",
 )
@@ -811,7 +797,7 @@ async def create_simple_firewall_policy(policy: Dict[str, Any], confirm: bool = 
 
 @server.tool(
     name="unifi_list_firewall_zones",
-    description="List controller firewall zones (V2 API).",
+    description="Zonas de firewall do controlador UniFi Network via API V2 — áreas de segurança, segmentos de rede e perímetros configurados para isolamento e controle de tráfego. Use quando precisar listar zonas disponíveis, identificar segmentos de proteção ou configurar políticas baseadas em zona. Retorna lista completa de zonas definidas no controlador UniFi.",
 )
 async def list_firewall_zones() -> Dict[str, Any]:
     zones = await firewall_manager.get_firewall_zones()
@@ -820,7 +806,7 @@ async def list_firewall_zones() -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_list_ip_groups",
-    description="List IP groups configured on the controller (V2 API).",
+    description="Grupos de IP do controlador UniFi Network via API V2 — conjuntos de endereços, coleções de hosts e agrupamentos de rede configurados para aplicação em regras de firewall. Use quando precisar listar grupos disponíveis, identificar conjuntos de endereços ou configurar políticas baseadas em grupo. Retorna lista completa de IP groups no controlador UniFi.",
 )
 async def list_ip_groups() -> Dict[str, Any]:
     groups = await firewall_manager.get_ip_groups()

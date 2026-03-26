@@ -7,26 +7,25 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional
 
-from src.runtime import config, usergroup_manager, server, system_manager
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
+from src.runtime import config, server, system_manager, usergroup_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry
-from src.utils.site_context import resolve_site_context, inject_site_metadata
-from src.exceptions import (
-    SiteNotFoundError,
-    SiteForbiddenError,
-    InvalidSiteParameterError,
-)
 
 logger = logging.getLogger(__name__)
 
 
 @server.tool(
     name="unifi_list_user_groups",
-    description="List all user groups on the Unifi Network controller. Supports multi-site with optional site parameter.",
+    description="Grupos de usuários do controlador UniFi Network — perfis de acesso, políticas de rede e configurações de permissão para segmentação de clientes por função, departamento ou localização. Use quando precisar listar user groups, auditar perfis ou revisar políticas. Retorna lista completa de grupos com nome, permissões e settings no controlador UniFi.",
 )
 async def list_user_groups(site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -52,11 +51,16 @@ async def list_user_groups(site: Optional[str] = None) -> Dict[str, Any]:
         # Convert UserGroup objects to plain dictionaries
         groups_raw = [g.raw if hasattr(g, "raw") else g for g in groups]
 
-        return inject_site_metadata({
-            "success": True,
-            "count": len(groups_raw),
-            "user_groups": groups_raw,
-        }, site_id, site_name, site_slug)
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(groups_raw),
+                "user_groups": groups_raw,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -67,7 +71,7 @@ async def list_user_groups(site: Optional[str] = None) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_user_group_details",
-    description="Get detailed information about a specific user group by ID. Supports multi-site with optional site parameter.",
+    description="Detalhes completos de grupo de usuários UniFi Network específico — informações de perfil de acesso, políticas de rede e configurações de permissão identificados por ID único. Use quando precisar auditar grupo específico, validar políticas ou revisar permissões. Retorna nome, tipo, bandwidth limits e settings do user group no controlador UniFi.",
 )
 async def get_user_group_details(group_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -92,15 +96,25 @@ async def get_user_group_details(group_id: str, site: Optional[str] = None) -> D
         group = await usergroup_manager.get_usergroup_details(group_id, site=site_slug)
         if group:
             group_raw = group.raw if hasattr(group, "raw") else group
-            return inject_site_metadata({
-                "success": True,
-                "user_group": group_raw,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "user_group": group_raw,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"User group with ID {group_id} not found",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"User group with ID {group_id} not found",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -111,11 +125,13 @@ async def get_user_group_details(group_id: str, site: Optional[str] = None) -> D
 
 @server.tool(
     name="unifi_create_user_group",
-    description="Create a new user group with validation. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Criação de grupo de usuários UniFi Network com validação — novo perfil de acesso, política de rede ou configuração de permissão com confirmação obrigatória. Use quando precisar adicionar user group, configurar políticas ou segmentar clientes. Cria grupo de usuários validado no controlador UniFi com suporte multi-site.",
     permission_category="usergroups",
     permission_action="create",
 )
-async def create_user_group(group_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def create_user_group(
+    group_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for creating user group with multi-site support.
 
@@ -159,16 +175,26 @@ async def create_user_group(group_data: Dict[str, Any], confirm: bool = False, s
         # Create the user group
         result = await usergroup_manager.create_usergroup(validated_data, site=site_slug)
         if result:
-            return inject_site_metadata({
-                "success": True,
-                "group_id": result.get("_id"),
-                "details": result,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "group_id": result.get("_id"),
+                    "details": result,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": "Failed to create user group",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": "Failed to create user group",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -179,11 +205,13 @@ async def create_user_group(group_data: Dict[str, Any], confirm: bool = False, s
 
 @server.tool(
     name="unifi_update_user_group",
-    description="Update a user group by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Atualização de grupo de usuários UniFi Network via ID — modificação de perfil de acesso, políticas de rede ou configurações de permissão com confirmação obrigatória. Use quando precisar ajustar user group ou modificar políticas. Executa update parcial de grupo de usuários no controlador UniFi com suporte multi-site.",
     permission_category="usergroups",
     permission_action="update",
 )
-async def update_user_group(group_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
+async def update_user_group(
+    group_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Implementation for updating user group with multi-site support.
 
@@ -239,17 +267,27 @@ async def update_user_group(group_id: str, update_data: Dict[str, Any], confirm:
         if success:
             # Fetch updated details
             updated = await usergroup_manager.get_usergroup_details(group_id, site=site_slug)
-            return inject_site_metadata({
-                "success": True,
-                "group_id": group_id,
-                "updated_fields": list(validated_data.keys()),
-                "details": updated,
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "group_id": group_id,
+                    "updated_fields": list(validated_data.keys()),
+                    "details": updated,
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to update user group {group_id}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to update user group {group_id}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
@@ -260,7 +298,7 @@ async def update_user_group(group_id: str, update_data: Dict[str, Any], confirm:
 
 @server.tool(
     name="unifi_delete_user_group",
-    description="Delete a user group by ID. Supports multi-site with optional site parameter. Requires confirmation.",
+    description="Exclusão de grupo de usuários UniFi Network via ID — remoção permanente de perfil de acesso, política de rede ou configuração de permissão com confirmação obrigatória. Use quando precisar remover user group obsoleto ou limpar políticas. Executa delete permanente de grupo de usuários no controlador UniFi com suporte multi-site.",
     permission_category="usergroups",
     permission_action="delete",
 )
@@ -309,15 +347,25 @@ async def delete_user_group(group_id: str, confirm: bool = False, site: Optional
         # Delete the user group
         success = await usergroup_manager.delete_usergroup(group_id, site=site_slug)
         if success:
-            return inject_site_metadata({
-                "success": True,
-                "message": f"User group {group_id} deleted successfully",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"User group {group_id} deleted successfully",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            return inject_site_metadata({
-                "success": False,
-                "error": f"Failed to delete user group {group_id}",
-            }, site_id, site_name, site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Failed to delete user group {group_id}",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
         logger.warning(f"Site parameter validation error: {e.message}")
         raise
