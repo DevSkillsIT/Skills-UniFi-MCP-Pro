@@ -1,0 +1,105 @@
+{
+  "timestamp": "2026-02-09T00:00:00Z",
+  "mcp_server": "unifi-network-mcp",
+  "pm2_status": {
+    "process_id": 12,
+    "name": "mcp-unifi",
+    "status": "online",
+    "pid": 2090624,
+    "uptime": "2 days",
+    "cpu": "0%",
+    "memory": "68.7mb"
+  },
+  "test_results": {
+    "total_tests": 226,
+    "passed": 186,
+    "failed": 40,
+    "execution_time_seconds": 22.76,
+    "failed_tests": [
+      "tests/test_clients_multisite.py::TestClientMultiSiteIntegration::test_client_operations_with_prefix_matching",
+      "tests/test_devices_multisite.py::TestSiteParameterIntegration::test_site_resolution_in_device_list",
+      "tests/test_devices_multisite.py::TestDeviceMultiSiteIntegration::test_site_fuzzy_matching",
+      "tests/test_devices_multisite.py::TestDeviceMultiSiteIntegration::test_site_prefix_matching",
+      "tests/test_firewall_multisite.py::TestSiteParameterIntegration::test_site_resolution_in_firewall_list",
+      "tests/test_firewall_multisite.py::TestFirewallToolsSignatures::test_firewall_tools_exist",
+      "tests/test_firewall_multisite.py::TestFirewallToolsSignatures::test_firewall_site_context_helpers",
+      "tests/test_firewall_multisite.py::TestFirewallToolsSignatures::test_firewall_helpers_consistency",
+      "tests/test_firewall_multisite.py::TestFirewallToolsSignatures::test_firewall_imports_site_resolver",
+      "tests/test_site_resolver.py::TestValidateSiteParameter::test_valid_site_parameter_uppercase",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_exact_match_by_name",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_case_insensitive_match",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_prefix_match",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_fuzzy_match_high_score",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_fuzzy_match_description",
+      "tests/test_site_resolver.py::TestResolveSiteIdentifier::test_whitespace_trimmed",
+      "tests/test_site_resolver.py::TestResolverIntegration::test_full_flow_fuzzy_match_allowed",
+      "tests/test_site_resolver.py::TestResolverIntegration::test_full_flow_fuzzy_match_denied",
+      "tests/unit/test_hotspot_manager.py::TestHotspotManager::test_get_vouchers_returns_list",
+      "tests/unit/test_hotspot_manager.py::TestHotspotManager::test_get_vouchers_filter_by_create_time",
+      "tests/unit/test_hotspot_manager.py::TestHotspotManager::test_get_vouchers_handles_dict_response",
+      "tests/unit/test_hotspot_manager.py::TestHotspotManager::test_get_vouchers_handles_error",
+      "tests/unit/test_hotspot_manager.py::TestHotspotManager::test_get_voucher_details_found",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_get_routes_returns_list",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_get_routes_handles_error",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_get_route_details_found",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_update_route_success",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_update_route_network_and_nexthop",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_update_route_no_updates",
+      "tests/unit/test_routing_manager.py::TestRoutingManager::test_update_route_invalidates_cache",
+      "tests/unit/test_tool_map_sync.py::TestToolMapSync::test_all_manifest_tools_in_map",
+      "tests/unit/test_tool_map_sync.py::TestToolMapSync::test_no_extra_tools_in_map",
+      "tests/unit/test_tool_map_sync.py::TestToolMapSync::test_tool_count_matches",
+      "tests/unit/test_tool_map_sync.py::TestToolMapSync::test_dynamic_discovery_works",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_get_usergroups_returns_list",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_get_usergroups_handles_dict_response",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_get_usergroups_handles_error",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_get_usergroup_details_found",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_update_usergroup_success",
+      "tests/unit/test_usergroup_manager.py::TestUsergroupManager::test_update_usergroup_invalidates_cache"
+    ],
+    "notes": "Falhas pré-existentes não relacionadas a descrições de tools. Relacionadas a site resolver, mocks de dados e tool map sync."
+  },
+  "tools_metadata_before_changes": {
+    "total_tools": 84,
+    "sample_tools": [
+      {
+        "name": "unifi_list_clients",
+        "description_original": "List clients/devices connected to the Unifi Network",
+        "description_length": 59,
+        "description_language": "en",
+        "params_count": 5
+      },
+      {
+        "name": "unifi_get_device_details",
+        "description_original": "Get detailed information about a specific device by MAC address",
+        "description_length": 67,
+        "description_language": "en",
+        "params_count": 2
+      },
+      {
+        "name": "unifi_create_voucher",
+        "description_original": "Create hotspot voucher(s) for guest network access.\n\nVouchers can have:\n- Time limits: How long the voucher is valid after activation\n- Usage quota: Single-use (1), multi-use (0), or n-times usable\n- Bandwidth limits: Upload/download speed caps in Kbps\n- Data caps: Total data transfer limit in MB",
+        "description_length": 255,
+        "description_language": "en",
+        "params_count": 8
+      },
+      {
+        "name": "unifi_toggle_firewall_policy",
+        "description_original": "Enable or disable a specific firewall policy by ID.",
+        "description_length": 54,
+        "description_language": "en",
+        "params_count": 2
+      },
+      {
+        "name": "unifi_list_networks",
+        "description_original": "List all configured networks (LAN, WAN, VLAN-only) on the Unifi Network controller (V1 API based).",
+        "description_length": 96,
+        "description_language": "en",
+        "params_count": 0
+      }
+    ]
+  },
+  "direct_tool_tests": {
+    "note": "Testes diretos serão executados em seguida via chamadas reais ao MCP"
+  }
+}
