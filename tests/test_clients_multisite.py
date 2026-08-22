@@ -73,8 +73,8 @@ class TestListClientsWithSite:
         from src.utils.site_resolver import validate_site_parameter
 
         # Test that site parameter is accepted and validated
-        site_validated = validate_site_parameter("wink")
-        assert site_validated == "wink"
+        site_validated = validate_site_parameter("acme")
+        assert site_validated == "acme"
 
     @pytest.mark.asyncio
     async def test_list_clients_backward_compatibility_without_site(self):
@@ -88,7 +88,7 @@ class TestListClientsWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -106,7 +106,7 @@ class TestListClientsWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink", "default"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme", "default"])
 
     @pytest.mark.asyncio
     async def test_list_clients_site_fuzzy_matching(self):
@@ -114,13 +114,13 @@ class TestListClientsWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
-            result = await resolve_site_identifier("wink")
+            result = await resolve_site_identifier("acme")
             assert result["slug"] == "abc123"
             assert result["display_name"] == "GW_PON_ASAG_Escritorio"
 
@@ -133,8 +133,8 @@ class TestGetClientDetailsWithSite:
         """RED: Should get client details for specified site."""
         from src.utils.site_resolver import validate_site_parameter
 
-        site_validated = validate_site_parameter("wink")
-        assert site_validated == "wink"
+        site_validated = validate_site_parameter("acme")
+        assert site_validated == "acme"
 
     @pytest.mark.asyncio
     async def test_get_client_details_backward_compatibility(self):
@@ -148,7 +148,7 @@ class TestGetClientDetailsWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -163,7 +163,7 @@ class TestGetClientDetailsWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme"])
 
 
 class TestBlockClientWithSite:
@@ -174,8 +174,8 @@ class TestBlockClientWithSite:
         """RED: Should block client on specified site."""
         from src.utils.site_resolver import validate_site_parameter
 
-        site_validated = validate_site_parameter("wink")
-        assert site_validated == "wink"
+        site_validated = validate_site_parameter("acme")
+        assert site_validated == "acme"
 
     @pytest.mark.asyncio
     async def test_block_client_backward_compatibility(self):
@@ -215,8 +215,8 @@ class TestUnblockClientWithSite:
         """RED: Should unblock client on specified site."""
         from src.utils.site_resolver import validate_site_parameter
 
-        site_validated = validate_site_parameter("wink")
-        assert site_validated == "wink"
+        site_validated = validate_site_parameter("acme")
+        assert site_validated == "acme"
 
     @pytest.mark.asyncio
     async def test_unblock_client_backward_compatibility(self):
@@ -257,9 +257,9 @@ class TestClientOperationsWithSiteResolver:
         from src.utils.site_resolver import validate_site_parameter
 
         # Valid site names (converted to lowercase)
-        assert validate_site_parameter("wink") == "wink"
+        assert validate_site_parameter("acme") == "acme"
         assert validate_site_parameter("default") == "default"
-        assert validate_site_parameter("Grupo-Wink") == "Grupo-Wink"  # validate_site_parameter doesn't lowercase
+        assert validate_site_parameter("Grupo-Acme") == "Grupo-Acme"  # validate_site_parameter doesn't lowercase
 
         # Invalid: special characters
         with pytest.raises(InvalidSiteParameterError):
@@ -274,11 +274,11 @@ class TestClientOperationsWithSiteResolver:
         await validate_site_access("any-site", allowed_sites=None)
 
         # Whitelisted site
-        await validate_site_access("wink", allowed_sites=["wink", "default"])
+        await validate_site_access("acme", allowed_sites=["acme", "default"])
 
         # Non-whitelisted site
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden", allowed_sites=["wink"])
+            await validate_site_access("forbidden", allowed_sites=["acme"])
 
     @pytest.mark.asyncio
     async def test_site_resolution_with_fuzzy_matching(self):
@@ -286,22 +286,22 @@ class TestClientOperationsWithSiteResolver:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Wink Site"},
-            {"_id": "def456", "name": "Ramada_Branch", "desc": "Ramada Site"},
+            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Acme Site"},
+            {"_id": "def456", "name": "Bravo_Branch", "desc": "Bravo Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
             # Test alias functionality (main validation for multi-site migration)
-            result = await resolve_site_identifier("wink")
+            result = await resolve_site_identifier("acme")
             assert result["slug"] == "abc123"
             assert result["display_name"] == "GW_PON_ASAG_Escritorio"
             
             # Test exact match functionality with available site
-            result = await resolve_site_identifier("Ramada_Branch")
+            result = await resolve_site_identifier("Bravo_Branch")
             assert result["slug"] == "def456"
-            assert result["display_name"] == "Ramada_Branch"
+            assert result["display_name"] == "Bravo_Branch"
 
 
 class TestClientSiteContextManagement:
@@ -316,7 +316,7 @@ class TestClientSiteContextManagement:
 
         # Validate that we can track site context
         original_site = "default"
-        new_site = validate_site_parameter("wink")
+        new_site = validate_site_parameter("acme")
 
         assert original_site != new_site
         # Context restoration would happen in the try/finally block
@@ -336,11 +336,11 @@ class TestClientMultiSiteIntegration:
     async def test_list_clients_different_sites_returns_different_results(self):
         """GREEN: Client lists should differ between sites."""
         # Create clients from different sites
-        wink_client = create_mock_client(mac="aa:bb:cc:dd:ee:01", name="Wink Client")
+        acme_client = create_mock_client(mac="aa:bb:cc:dd:ee:01", name="Acme Client")
         default_client = create_mock_client(mac="bb:bb:cc:dd:ee:02", name="Default Client")
 
-        assert wink_client["mac"] != default_client["mac"]
-        assert wink_client["name"] != default_client["name"]
+        assert acme_client["mac"] != default_client["mac"]
+        assert acme_client["name"] != default_client["name"]
 
     @pytest.mark.asyncio
     async def test_client_operations_with_prefix_matching(self):
@@ -355,8 +355,8 @@ class TestClientMultiSiteIntegration:
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
-            # Test with actual alias target from .env (wink -> GW_PON_ASAG_Escritorio)
-            result = await resolve_site_identifier("wink")
+            # Test with actual alias target from .env (acme -> GW_PON_ASAG_Escritorio)
+            result = await resolve_site_identifier("acme")
             assert result["slug"] == "abc123"
             assert result["display_name"] == "GW_PON_ASAG_Escritorio"
 
@@ -387,8 +387,8 @@ class TestClientErrorHandling:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
-            {"_id": "def456", "name": "Ramada", "desc": "Ramada Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
+            {"_id": "def456", "name": "Bravo", "desc": "Bravo Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:

@@ -71,8 +71,8 @@ class TestListNetworksWithSite:
         from src.utils.site_resolver import validate_site_parameter
 
         # Test that site parameter is accepted and validated
-        site_validated = validate_site_parameter("wink")
-        assert site_validated == "wink"
+        site_validated = validate_site_parameter("acme")
+        assert site_validated == "acme"
 
     @pytest.mark.asyncio
     async def test_list_networks_backward_compatibility_without_site(self):
@@ -86,7 +86,7 @@ class TestListNetworksWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -104,7 +104,7 @@ class TestListNetworksWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink", "default"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme", "default"])
 
 
 class TestCreateNetworkWithSite:
@@ -115,8 +115,8 @@ class TestCreateNetworkWithSite:
         """RED: Should create network for specified site."""
         from src.utils.site_resolver import validate_site_parameter
 
-        site_validated = validate_site_parameter("ramada")
-        assert site_validated == "ramada"
+        site_validated = validate_site_parameter("bravo")
+        assert site_validated == "bravo"
 
     @pytest.mark.asyncio
     async def test_create_network_backward_compatibility_without_site(self):
@@ -130,7 +130,7 @@ class TestCreateNetworkWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Ramada", "desc": "Ramada Site"},
+            {"_id": "abc123", "name": "Bravo", "desc": "Bravo Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -186,4 +186,4 @@ class TestUpdateNetworkWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("restricted-site", allowed_sites=["default", "wink"])
+            await validate_site_access("restricted-site", allowed_sites=["default", "acme"])

@@ -45,8 +45,8 @@ class TestValidateSiteParameter:
 
     def test_valid_site_parameter_with_hyphen(self):
         """RED: Should accept hyphens."""
-        result = validate_site_parameter("groupe-wink")
-        assert result == "groupe-wink"
+        result = validate_site_parameter("groupe-acme")
+        assert result == "groupe-acme"
 
     def test_valid_site_parameter_with_underscore(self):
         """RED: Should accept underscores."""
@@ -95,15 +95,15 @@ class TestResolveSiteIdentifier:
         """RED: Should find exact match by site name."""
         sites = [
             create_mock_site("default", "abc123"),
-            create_mock_site("grupowink", "def456", "Grupo Wink"),
+            create_mock_site("grupoacme", "def456", "Grupo Acme"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
-            result = await resolve_site_identifier("grupowink")
+            result = await resolve_site_identifier("grupoacme")
 
-            assert result["slug"] == "grupowink"
+            assert result["slug"] == "grupoacme"
             assert result["id"] == "def456"
 
     @pytest.mark.asyncio
@@ -111,15 +111,15 @@ class TestResolveSiteIdentifier:
         """RED: Should match case-insensitively."""
         sites = [
             create_mock_site("Default", "abc123"),
-            create_mock_site("GrupoWink", "def456"),
+            create_mock_site("GrupoAcme", "def456"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
-            result = await resolve_site_identifier("GRUPOWINK")
+            result = await resolve_site_identifier("GRUPOACME")
 
-            assert result["slug"] == "GrupoWink"
+            assert result["slug"] == "GrupoAcme"
             assert result["id"] == "def456"
 
     @pytest.mark.asyncio
@@ -127,7 +127,7 @@ class TestResolveSiteIdentifier:
         """RED: Should match by prefix."""
         sites = [
             create_mock_site("default", "abc123"),
-            create_mock_site("ramada", "def456"),
+            create_mock_site("bravo", "def456"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
@@ -135,28 +135,28 @@ class TestResolveSiteIdentifier:
 
             result = await resolve_site_identifier("ram")
 
-            assert result["slug"] == "ramada"
+            assert result["slug"] == "bravo"
 
     @pytest.mark.asyncio
     async def test_fuzzy_match_high_score(self):
         """RED: Should fuzzy match with threshold 80%."""
         sites = [
-            create_mock_site("grupowink", "def456", "Grupo Wink PMW"),
+            create_mock_site("grupoacme", "def456", "Grupo Acme PMW"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
-            # "wink" should match "Grupo Wink" with score > 80%
-            result = await resolve_site_identifier("wink")
+            # "acme" should match "Grupo Acme" with score > 80%
+            result = await resolve_site_identifier("acme")
 
-            assert result["slug"] == "grupowink"
+            assert result["slug"] == "grupoacme"
 
     @pytest.mark.asyncio
     async def test_fuzzy_match_description(self):
         """RED: Should also fuzzy match in description."""
         sites = [
-            create_mock_site("gw_pmw_escritorio", "xyz789", "Escritório PMW Grupo Wink"),
+            create_mock_site("gw_pmw_escritorio", "xyz789", "Escritório PMW Grupo Acme"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
@@ -240,8 +240,8 @@ class TestValidateSiteAccess:
         """RED: Should allow sites in whitelist."""
         # Should not raise
         await validate_site_access(
-            "grupowink",
-            allowed_sites=["default", "grupowink", "ramada"]
+            "grupoacme",
+            allowed_sites=["default", "grupoacme", "bravo"]
         )
 
     @pytest.mark.asyncio
@@ -250,7 +250,7 @@ class TestValidateSiteAccess:
         with pytest.raises(SiteForbiddenError) as exc_info:
             await validate_site_access(
                 "forbidden",
-                allowed_sites=["default", "grupowink"]
+                allowed_sites=["default", "grupoacme"]
             )
 
         assert exc_info.value.error_code == "SITE_ACCESS_DENIED"
@@ -261,8 +261,8 @@ class TestValidateSiteAccess:
         """RED: Should handle case-insensitive whitelist."""
         # Should not raise
         await validate_site_access(
-            "GRUPOWINK",
-            allowed_sites=["default", "grupowink"]
+            "GRUPOACME",
+            allowed_sites=["default", "grupoacme"]
         )
 
     @pytest.mark.asyncio
@@ -279,39 +279,39 @@ class TestResolverIntegration:
     async def test_full_flow_fuzzy_match_allowed(self):
         """RED: Full flow - fuzzy match + access validation."""
         sites = [
-            create_mock_site("grupowink", "def456", "Grupo Wink"),
+            create_mock_site("grupoacme", "def456", "Grupo Acme"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
             # Resolve fuzzy
-            result = await resolve_site_identifier("wink")
-            assert result["slug"] == "grupowink"
+            result = await resolve_site_identifier("acme")
+            assert result["slug"] == "grupoacme"
 
             # Validate access
             await validate_site_access(
                 result["slug"],
-                allowed_sites=["grupowink", "default"]
+                allowed_sites=["grupoacme", "default"]
             )
 
     @pytest.mark.asyncio
     async def test_full_flow_fuzzy_match_denied(self):
         """RED: Full flow - fuzzy match resolved but access denied."""
         sites = [
-            create_mock_site("grupowink", "def456", "Grupo Wink"),
+            create_mock_site("grupoacme", "def456", "Grupo Acme"),
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
             # Resolve fuzzy
-            result = await resolve_site_identifier("wink")
-            assert result["slug"] == "grupowink"
+            result = await resolve_site_identifier("acme")
+            assert result["slug"] == "grupoacme"
 
             # Access denied
             with pytest.raises(SiteForbiddenError):
                 await validate_site_access(
                     result["slug"],
-                    allowed_sites=["default"]  # grupowink not in list
+                    allowed_sites=["default"]  # grupoacme not in list
                 )

@@ -248,7 +248,7 @@ async def resolve_site_identifier(site_input: str) -> Dict[str, str]:
     if matches:
         best_match = max(matches, key=lambda x: x[1])
         # With token_set_ratio, 60% is a good threshold for substrings
-        # e.g., "wink" matching "grupo wink" = 100%, "wink" in "grupowink" = 61%
+        # e.g., "acme" matching "grupo acme" = 100%, "acme" in "grupoacme" = 61%
         if best_match[1] >= 60:
             site = best_match[0]
             return {
@@ -278,7 +278,7 @@ def _fuzzy_score(s1: str, s2: str) -> int:
     """
     if RAPIDFUZZ_AVAILABLE:
         # token_set_ratio is better for substring matching
-        # e.g., "wink" in "Grupo Wink" scores higher
+        # e.g., "acme" in "Grupo Acme" scores higher
         return int(fuzz.token_set_ratio(s1, s2))
     else:
         # Fallback to difflib - simple ratio
@@ -294,7 +294,7 @@ async def validate_site_access(
     Validate that site is in the allowed list.
 
     Args:
-        site_slug: Site slug/name from resolver (e.g., "grupowink")
+        site_slug: Site slug/name from resolver (e.g., "grupoacme")
         allowed_sites: List of allowed site slugs (None = ALL sites allowed)
 
     Raises:

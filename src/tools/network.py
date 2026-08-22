@@ -33,7 +33,7 @@ async def list_networks(site: Optional[str] = None) -> Dict[str, Any]:
 
     Args:
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         Dict with network list and site metadata

@@ -80,7 +80,7 @@ async def list_firewall_policies(include_predefined: bool = False, site: Optiona
     Args:
         include_predefined (bool): Whether to include predefined system policies (default: False).
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         A dictionary containing:
@@ -401,7 +401,7 @@ async def create_firewall_policy(
         policy_data (Dict[str, Any]): A dictionary containing the firewall policy configuration.
         confirm (bool): Must be explicitly set to `True` to execute the creation. Defaults to `False`.
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         A dictionary containing:
@@ -549,7 +549,7 @@ async def update_firewall_policy(
             - logging (boolean): New logging state.
         confirm (bool): Must be explicitly set to `True` to execute the update. Defaults to `False`.
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         A dictionary containing:

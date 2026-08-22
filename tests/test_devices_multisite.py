@@ -123,8 +123,8 @@ class TestSiteParameterIntegration:
         from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
 
         # Test that we can validate a site parameter
-        result = validate_site_parameter("wink")
-        assert result == "wink"
+        result = validate_site_parameter("acme")
+        assert result == "acme"
 
         # Test that validate_site_parameter rejects invalid inputs
         with pytest.raises(InvalidSiteParameterError):
@@ -138,7 +138,7 @@ class TestSiteParameterIntegration:
 
         # Mock sites list
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
             {"_id": "def456", "name": "default", "desc": "Default Site"},
         ]
 
@@ -147,8 +147,8 @@ class TestSiteParameterIntegration:
             mock_get.return_value = all_sites
 
             # Test exact match
-            result = await resolve_site_identifier("Wink")
-            assert result["slug"] == "Wink"
+            result = await resolve_site_identifier("Acme")
+            assert result["slug"] == "Acme"
             assert result["id"] == "abc123"
 
     @pytest.mark.asyncio
@@ -157,11 +157,11 @@ class TestSiteParameterIntegration:
         # This test validates cross-site device queries
 
         # Create mock devices from different sites
-        wink_device = create_mock_device(mac="aa:bb:cc:dd:ee:01", name="Wink AP")
+        acme_device = create_mock_device(mac="aa:bb:cc:dd:ee:01", name="Acme AP")
         default_device = create_mock_device(mac="bb:bb:cc:dd:ee:02", name="Default AP")
 
-        assert wink_device["mac"] != default_device["mac"]
-        assert wink_device["name"] != default_device["name"]
+        assert acme_device["mac"] != default_device["mac"]
+        assert acme_device["name"] != default_device["name"]
 
 
 class TestSiteWhitelistValidation:
@@ -176,11 +176,11 @@ class TestSiteWhitelistValidation:
         await validate_site_access("any-site", allowed_sites=None)
 
         # Test whitelisted site
-        await validate_site_access("wink", allowed_sites=["wink", "default"])
+        await validate_site_access("acme", allowed_sites=["acme", "default"])
 
         # Test non-whitelisted site raises error
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink", "default"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme", "default"])
 
     @pytest.mark.asyncio
     async def test_site_not_found_error_with_suggestions(self):
@@ -188,8 +188,8 @@ class TestSiteWhitelistValidation:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
-            {"_id": "def456", "name": "Ramada", "desc": "Ramada Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
+            {"_id": "def456", "name": "Bravo", "desc": "Bravo Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -210,7 +210,7 @@ class TestCacheStrategyWithSite:
     async def test_cache_key_includes_site_slug(self):
         """REFACTOR: Cache keys should include site slug for isolation."""
         # This test validates the caching strategy
-        # When site="Wink", cache key should be like "devices_wink_*"
+        # When site="Acme", cache key should be like "devices_acme_*"
         # When site="default", cache key should be like "devices_default_*"
 
         # Placeholder for cache key validation
@@ -249,7 +249,7 @@ class TestDeviceToolsErrorHandling:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -272,16 +272,16 @@ class TestDeviceMultiSiteIntegration:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Grupo Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Grupo Acme", "desc": "Acme Site"},
             {"_id": "def456", "name": "default", "desc": "Default Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
-            # Fuzzy match "wink" to "Grupo Wink"
-            result = await resolve_site_identifier("wink")
-            assert result["slug"] == "Grupo Wink"
+            # Fuzzy match "acme" to "Grupo Acme"
+            result = await resolve_site_identifier("acme")
+            assert result["slug"] == "Grupo Acme"
 
     @pytest.mark.asyncio
     async def test_site_prefix_matching(self):
@@ -289,7 +289,7 @@ class TestDeviceMultiSiteIntegration:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "wink-branch-1", "desc": ""},
+            {"_id": "abc123", "name": "acme-branch-1", "desc": ""},
             {"_id": "def456", "name": "default", "desc": ""},
         ]
 
@@ -297,5 +297,5 @@ class TestDeviceMultiSiteIntegration:
             mock_get.return_value = all_sites
 
             # Prefix match
-            result = await resolve_site_identifier("wink")
-            assert result["slug"] == "wink-branch-1"
+            result = await resolve_site_identifier("acme")
+            assert result["slug"] == "acme-branch-1"

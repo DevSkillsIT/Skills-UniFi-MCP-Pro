@@ -73,13 +73,13 @@ class TestListFirewallPoliciesWithSite:
 
     @pytest.mark.asyncio
     async def test_list_firewall_policies_with_site_fuzzy_matching(self):
-        """RED: Should support fuzzy site matching (e.g., 'wink' for 'Wink')."""
+        """RED: Should support fuzzy site matching (e.g., 'acme' for 'Acme')."""
         # Validates fuzzy site name matching
         from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
 
         # Test that fuzzy matching works
-        result = validate_site_parameter("wink")
-        assert result == "wink"
+        result = validate_site_parameter("acme")
+        assert result == "acme"
 
     @pytest.mark.asyncio
     async def test_list_firewall_policies_site_not_found(self):
@@ -87,7 +87,7 @@ class TestListFirewallPoliciesWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
             {"_id": "def456", "name": "default", "desc": "Default Site"},
         ]
 
@@ -105,7 +105,7 @@ class TestListFirewallPoliciesWithSite:
 
         # Test non-whitelisted site raises error
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink", "default"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme", "default"])
 
 
 class TestCreateFirewallPolicyWithSite:
@@ -123,7 +123,7 @@ class TestCreateFirewallPolicyWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -138,7 +138,7 @@ class TestCreateFirewallPolicyWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden", allowed_sites=["wink"])
+            await validate_site_access("forbidden", allowed_sites=["acme"])
 
 
 class TestUpdateFirewallPolicyWithSite:
@@ -156,7 +156,7 @@ class TestUpdateFirewallPolicyWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -171,7 +171,7 @@ class TestUpdateFirewallPolicyWithSite:
         from src.utils.site_resolver import validate_site_access
 
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden", allowed_sites=["wink"])
+            await validate_site_access("forbidden", allowed_sites=["acme"])
 
 
 class TestSiteParameterIntegration:
@@ -183,8 +183,8 @@ class TestSiteParameterIntegration:
         from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
 
         # Test that we can validate a site parameter
-        result = validate_site_parameter("wink")
-        assert result == "wink"
+        result = validate_site_parameter("acme")
+        assert result == "acme"
 
         # Test that validate_site_parameter rejects invalid inputs
         with pytest.raises(InvalidSiteParameterError):
@@ -196,7 +196,7 @@ class TestSiteParameterIntegration:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
             {"_id": "def456", "name": "default", "desc": "Default Site"},
         ]
 
@@ -204,25 +204,25 @@ class TestSiteParameterIntegration:
             mock_get.return_value = all_sites
 
             # Test exact match
-            result = await resolve_site_identifier("Wink")
-            assert result["slug"] == "Wink"
+            result = await resolve_site_identifier("Acme")
+            assert result["slug"] == "Acme"
             assert result["id"] == "abc123"
 
     @pytest.mark.asyncio
     async def test_firewall_operations_with_different_sites(self):
         """GREEN: Firewall operations should work with site-specific filtering."""
         # Create mock policies from different sites
-        wink_policy = create_mock_firewall_policy(
-            policy_id="wink_policy_001",
-            name="Wink Firewall Rule"
+        acme_policy = create_mock_firewall_policy(
+            policy_id="acme_policy_001",
+            name="Acme Firewall Rule"
         )
         default_policy = create_mock_firewall_policy(
             policy_id="default_policy_001",
             name="Default Firewall Rule"
         )
 
-        assert wink_policy["_id"] != default_policy["_id"]
-        assert wink_policy["name"] != default_policy["name"]
+        assert acme_policy["_id"] != default_policy["_id"]
+        assert acme_policy["name"] != default_policy["name"]
 
 
 class TestSiteWhitelistValidation:
@@ -237,11 +237,11 @@ class TestSiteWhitelistValidation:
         await validate_site_access("any-site", allowed_sites=None)
 
         # Test whitelisted site
-        await validate_site_access("wink", allowed_sites=["wink", "default"])
+        await validate_site_access("acme", allowed_sites=["acme", "default"])
 
         # Test non-whitelisted site raises error
         with pytest.raises(SiteForbiddenError):
-            await validate_site_access("forbidden-site", allowed_sites=["wink", "default"])
+            await validate_site_access("forbidden-site", allowed_sites=["acme", "default"])
 
     @pytest.mark.asyncio
     async def test_firewall_site_not_found_error_with_suggestions(self):
@@ -249,8 +249,8 @@ class TestSiteWhitelistValidation:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "Wink", "desc": "Wink Site"},
-            {"_id": "def456", "name": "Ramada", "desc": "Ramada Site"},
+            {"_id": "abc123", "name": "Acme", "desc": "Acme Site"},
+            {"_id": "def456", "name": "Bravo", "desc": "Bravo Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
@@ -262,7 +262,7 @@ class TestSiteWhitelistValidation:
 
             error_msg = str(exc_info.value)
             # Should contain suggestions
-            assert "Wink" in error_msg or "Ramada" in error_msg or "suggestions" in error_msg.lower()
+            assert "Acme" in error_msg or "Bravo" in error_msg or "suggestions" in error_msg.lower()
 
 
 class TestFirewallPolicyDataStructure:

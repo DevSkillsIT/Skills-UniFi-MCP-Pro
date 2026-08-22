@@ -178,7 +178,7 @@ async def <operation>(
     Args:
         # ... existing parameters ...
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         # ... return documentation ...

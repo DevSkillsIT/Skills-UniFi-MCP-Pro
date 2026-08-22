@@ -80,16 +80,16 @@ class TestSiteNotFoundError:
     def test_site_not_found_error_with_suggestions(self):
         """RED: Should include suggestions in details."""
         error = SiteNotFoundError(
-            site_name="wink",
-            suggestions=["Wink", "Ramada"]
+            site_name="acme",
+            suggestions=["Acme", "Bravo"]
         )
 
         result = error.to_dict()
 
         assert result["error"] == "SITE_NOT_FOUND"
         assert result["http_status"] == 404
-        assert result["details"]["requested_site"] == "wink"
-        assert result["details"]["suggestions"] == ["Wink", "Ramada"]
+        assert result["details"]["requested_site"] == "acme"
+        assert result["details"]["suggestions"] == ["Acme", "Bravo"]
 
     def test_site_not_found_error_without_suggestions(self):
         """RED: Should handle missing suggestions."""
@@ -121,7 +121,7 @@ class TestSiteForbiddenError:
         """RED: Should include allowed sites in details."""
         error = SiteForbiddenError(
             site_name="default",
-            allowed_sites=["Wink", "Ramada"]
+            allowed_sites=["Acme", "Bravo"]
         )
 
         result = error.to_dict()
@@ -129,7 +129,7 @@ class TestSiteForbiddenError:
         assert result["error"] == "SITE_ACCESS_DENIED"
         assert result["http_status"] == 403
         assert result["details"]["requested_site"] == "default"
-        assert result["details"]["allowed_sites"] == ["Wink", "Ramada"]
+        assert result["details"]["allowed_sites"] == ["Acme", "Bravo"]
 
     def test_site_forbidden_error_without_allowed_sites(self):
         """RED: Should handle ALL mode."""

@@ -141,7 +141,7 @@ MULTI-SITE SUPPORT:
 If 'site' parameter is provided, it will be automatically injected into the tool's arguments.
 The site resolver will:
 1. Validate the site parameter (alphanumeric + hyphen/underscore only)
-2. Resolve friendly names to site slugs (e.g., "wink" → "grupo-wink")
+2. Resolve friendly names to site slugs (e.g., "acme" → "grupo-acme")
 3. Validate access against UNIFI_SITE whitelist (if configured)
 4. Execute the tool in the context of the specified site
 5. Restore the original site context after execution
@@ -196,7 +196,7 @@ For bulk/parallel operations, use unifi_batch instead.""",
                 "arguments": {"type": "object", "description": "Tool parameters from schema"},
                 "site": {
                     "type": "string",
-                    "description": "Optional site name/slug for multi-site support. Accepts fuzzy matching (e.g., 'wink', 'Grupo Wink')."
+                    "description": "Optional site name/slug for multi-site support. Accepts fuzzy matching (e.g., 'acme', 'Grupo Acme')."
                 },
             },
         },

@@ -64,7 +64,7 @@ PASSED ✅
 3. **Fuzzy Matching**
 ```python
 # test_devices_multisite.py::TestDeviceMultiSiteIntegration::test_site_fuzzy_matching
-# Verifica resolução: "wink" → "Wink" → "Grupo Wink"
+# Verifica resolução: "acme" → "Acme" → "Grupo Acme"
 PASSED ✅
 ```
 
@@ -132,7 +132,7 @@ async def list_devices(
         status: Filter by status (all, online, offline, pending, etc.)
         include_details: Include detailed information for each device
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
               ↑ CRISTALINAMENTE CLARO
 
     Returns:
@@ -508,11 +508,11 @@ test_cross_site_cache_isolation                           ← Claro
 {
     "success": False,
     "error": "SITE_NOT_FOUND",
-    "message": "Site 'xyz' not found in UniFi Controller. Available sites: Skills IT, Ramada, Grupo Wink, acme-corp, contoso",
+    "message": "Site 'xyz' not found in UniFi Controller. Available sites: Skills IT, Bravo, Grupo Acme, acme-corp, contoso",
     "http_status": 404,
     "details": {
         "requested_site": "xyz",
-        "suggestions": ["Skills IT", "Ramada", "Grupo Wink", "acme-corp", "contoso"]
+        "suggestions": ["Skills IT", "Bravo", "Grupo Acme", "acme-corp", "contoso"]
     }
 }
 ```
@@ -546,28 +546,28 @@ await list_devices(device_type="ap")  # Outros parâmetros funcionam normalmente
 
 ### Fuzzy Matching Validation
 
-**Resolução de site "Wink":**
+**Resolução de site "Acme":**
 ```
-Input: "wink"
-  → Normalized: "wink"
+Input: "acme"
+  → Normalized: "acme"
   → Exact match: None
   → Prefix match: None
-  → Fuzzy match: "Grupo Wink" (token_set_ratio = 100%)
-  ✅ RESOLVED TO: {"slug": "Grupo Wink", "id": "abc123"}
+  → Fuzzy match: "Grupo Acme" (token_set_ratio = 100%)
+  ✅ RESOLVED TO: {"slug": "Grupo Acme", "id": "abc123"}
 
-Input: "grupo-wink"
-  → Normalized: "grupo-wink"
+Input: "grupo-acme"
+  → Normalized: "grupo-acme"
   → Exact match: None
-  → Prefix match: "Grupo Wink" (starts with "grupo-wink"? No)
-  → Fuzzy match: "Grupo Wink" (token_set_ratio = 100%)
-  ✅ RESOLVED TO: {"slug": "Grupo Wink", "id": "abc123"}
+  → Prefix match: "Grupo Acme" (starts with "grupo-acme"? No)
+  → Fuzzy match: "Grupo Acme" (token_set_ratio = 100%)
+  ✅ RESOLVED TO: {"slug": "Grupo Acme", "id": "abc123"}
 
-Input: "GrupoWink"
-  → Normalized: "grupowink"
+Input: "GrupoAcme"
+  → Normalized: "grupoacme"
   → Exact match: None
   → Prefix match: None
-  → Fuzzy match: "Grupo Wink" (token_set_ratio ~85%)
-  ✅ RESOLVED TO: {"slug": "Grupo Wink", "id": "abc123"}
+  → Fuzzy match: "Grupo Acme" (token_set_ratio ~85%)
+  ✅ RESOLVED TO: {"slug": "Grupo Acme", "id": "abc123"}
 ```
 
 **Taxa de sucesso:** 2/2 testes fuzzy matching = 100%
@@ -579,10 +579,10 @@ Input: "GrupoWink"
 # Cenário:
 device_manager._connection.site = "skills"
 
-await list_devices(site="ramada")
+await list_devices(site="bravo")
 # Internamente:
 #   original_site = "skills"
-#   device_manager._connection.site = "ramada"
+#   device_manager._connection.site = "bravo"
 #   ... fetch devices ...
 #   finally: device_manager._connection.site = "skills"
 
@@ -703,7 +703,7 @@ Refatoradas 12 tools em 4 módulos:
 - firewall.py: 3 tools (list, create, update firewall policies)
 
 Características:
-✅ Fuzzy matching de sites ("wink" → "Grupo Wink")
+✅ Fuzzy matching de sites ("acme" → "Grupo Acme")
 ✅ Whitelist enforcement via UNIFI_SITE env var
 ✅ Backward compatibility garantida
 ✅ Gerenciamento robusto de contexto de site

@@ -306,7 +306,7 @@ async def block_client(mac_address: str, confirm: bool = False, site: Optional[s
         mac_address: MAC address of the client
         confirm: Whether to confirm the action (shows preview if false)
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         Dict with operation result
@@ -397,7 +397,7 @@ async def unblock_client(mac_address: str, confirm: bool = False, site: Optional
         mac_address: MAC address of the client
         confirm: Whether to confirm the action (shows preview if false)
         site: Optional site name/slug. If None, uses current default site.
-              Accepts fuzzy matching (e.g., "Wink", "wink", "grupo-wink" for "Grupo Wink")
+              Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
     Returns:
         Dict with operation result
