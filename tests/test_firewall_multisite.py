@@ -66,13 +66,6 @@ class TestListFirewallPoliciesWithSite:
     """Test list_firewall_policies with site parameter."""
 
     @pytest.mark.asyncio
-    async def test_list_firewall_policies_backward_compatibility_without_site(self):
-        """GREEN: Should list policies without site parameter (default site mode)."""
-        # This is a behavioral test that validates backward compatibility
-        # The actual implementation will be updated in GREEN phase
-        assert True  # Placeholder for backward compatibility test
-
-    @pytest.mark.asyncio
     async def test_list_firewall_policies_with_site_fuzzy_matching(self):
         """RED: Should support fuzzy site matching (e.g., 'acme' for 'Acme')."""
         # Validates fuzzy site name matching
@@ -113,12 +106,6 @@ class TestCreateFirewallPolicyWithSite:
     """Test create_firewall_policy with site parameter."""
 
     @pytest.mark.asyncio
-    async def test_create_firewall_policy_backward_compatibility(self):
-        """GREEN: Should accept policy_data and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_create_firewall_policy_site_not_found(self):
         """RED: Should raise SiteNotFoundError for invalid site."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -144,12 +131,6 @@ class TestCreateFirewallPolicyWithSite:
 
 class TestUpdateFirewallPolicyWithSite:
     """Test update_firewall_policy with site parameter."""
-
-    @pytest.mark.asyncio
-    async def test_update_firewall_policy_backward_compatibility(self):
-        """GREEN: Should accept policy_id, update_data and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
 
     @pytest.mark.asyncio
     async def test_update_firewall_policy_site_not_found(self):

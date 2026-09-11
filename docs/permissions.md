@@ -16,22 +16,29 @@ Permissions are configured in `src/config/config.yaml`:
 
 ```yaml
 permissions:
+  # Delete is refused unconditionally in parse_permission(), whatever this file
+  # says. Removing a network, WLAN or firewall rule through an LLM is not a
+  # reversible mistake, so the gate is in code rather than in configuration.
+
   default:
     create: true
     update: true
 
   networks:
-    create: false  # Provisioning a new network can disrupt traffic
-    update: false  # Changing subnets, VLANs, DHCP ranges requires care
+    create: true   # Provisioning a new network can disrupt traffic
+    update: true   # Changing subnets, VLANs, DHCP ranges requires care
 
   devices:
-    create: false  # Adoption/provisioning
-    update: false  # Firmware upgrades, renames, etc.
+    create: true   # Adoption / provisioning
+    update: true   # Reboot, firmware upgrade, rename
 
-  clients:
-    create: false  # Not applicable
-    update: false  # Block/unblock, reconnect, etc.
+  events:
+    create: false  # Events are read-only
+    update: true   # Allow archiving alarms
 ```
+
+Set a category to `false` to withhold it. A category with no entry falls back to
+`default`; an action with no entry under `default` either is refused.
 
 ### 2. Tool Decorators
 
@@ -69,36 +76,46 @@ else:
 
 ## Permission Categories
 
-| Category | Default | Description |
-|----------|---------|-------------|
-| **networks** | ❌ Disabled | Network creation/modification (high risk) |
-| **wlans** | ❌ Disabled | Wireless network configuration (high risk) |
-| **devices** | ❌ Disabled | Device adoption, upgrades, reboots (high risk) |
-| **clients** | ❌ Disabled | Client blocking, reconnection (medium risk) |
-| **vpn_servers** | Create: ❌ Update: ✅ | VPN server configuration |
-| **firewall_policies** | ✅ Enabled | Firewall rule management |
-| **traffic_routes** | ✅ Enabled | Static route configuration |
-| **port_forwards** | ✅ Enabled | Port forwarding rules |
-| **qos_rules** | ✅ Enabled | Quality of Service rules |
-| **vpn_clients** | ✅ Enabled | VPN client configuration |
+| Category | Shipped default | Description |
+|----------|-----------------|-------------|
+| **networks** | ✅ Create / Update | Network and VLAN creation and modification (high risk) |
+| **wlans** | ✅ Create / Update | Wireless network configuration (high risk) |
+| **devices** | ✅ Create / Update | Device adoption, upgrades, reboots, radio changes (high risk) |
+| **clients** | ✅ Update | Client blocking, reconnection, guest authorization, fixed IP (medium risk) |
+| **firewall_policies** | ✅ Create / Update | Firewall policy management |
+| **traffic_routes** | ✅ Create / Update | Policy-based routing (V2 API) |
+| **routing** | ✅ Create / Update | Static routes (V1 API) |
+| **port_forwards** | ✅ Create / Update | Port forwarding rules |
+| **qos_rules** | ✅ Create / Update | Quality of Service rules |
+| **vpn** | ✅ Create / Update | VPN configuration |
+| **usergroups** | ✅ Create / Update | Bandwidth profiles / user groups |
+| **vouchers** | ✅ Create / Update | Guest hotspot vouchers |
+| **snmp** | ✅ Update | SNMP settings |
+| **events** | ✅ Update, ❌ Create | Archiving alarms; events themselves are read-only |
+| **system** | ❌ Admin | `unifi_restart_controller` needs `system.admin`, which no entry grants |
+
+Every category resolves through the same chain, so a category absent from
+`config.yaml` (such as `routing`, `vpn` or `snmp`) inherits `default`.
 
 ## Default Configuration Rationale
 
-The default configuration is **conservative** and prioritizes network stability:
+Two gates are absolute and sit in code rather than in configuration:
 
-### Disabled by Default (High Risk)
+- **Delete is always refused.** `parse_permission()` returns `False` for the
+  `delete` action before it reads the environment or the config file, so
+  `unifi_delete_static_route`, `unifi_delete_traffic_route`,
+  `unifi_delete_user_group` and `unifi_delete_vpn_config` are never registered.
+- **An unmapped action is refused.** Only `read` is allowed when neither the
+  category nor `default` names the action.
+
+Everything else is a configuration decision, and the shipped `config.yaml`
+grants create and update broadly. Withhold the categories whose blast radius
+you are not willing to hand an agent:
 
 - **networks**: Creating/modifying networks can cause network outages
 - **wlans**: Wireless changes can disconnect all Wi-Fi clients
-- **devices**: Device upgrades can cause downtime
+- **devices**: Reboots, adoptions and upgrades cause downtime
 - **clients**: Client operations affect user connectivity
-
-### Enabled by Default (Lower Risk)
-
-- **firewall_policies**: Typically additive (allow rules)
-- **traffic_routes**: Well-scoped changes
-- **port_forwards**: Isolated impact
-- **qos_rules**: Performance tuning, non-breaking
 
 ## Enabling Permissions
 
@@ -174,21 +191,32 @@ Environment variables follow the pattern: `UNIFI_PERMISSIONS_<CATEGORY>_<ACTION>
 | **traffic_routes** | `UNIFI_PERMISSIONS_TRAFFIC_ROUTES_CREATE` | `UNIFI_PERMISSIONS_TRAFFIC_ROUTES_UPDATE` |
 | **port_forwards** | `UNIFI_PERMISSIONS_PORT_FORWARDS_CREATE` | `UNIFI_PERMISSIONS_PORT_FORWARDS_UPDATE` |
 | **qos_rules** | `UNIFI_PERMISSIONS_QOS_RULES_CREATE` | `UNIFI_PERMISSIONS_QOS_RULES_UPDATE` |
-| **vpn_clients** | `UNIFI_PERMISSIONS_VPN_CLIENTS_CREATE` | `UNIFI_PERMISSIONS_VPN_CLIENTS_UPDATE` |
-| **vpn_servers** | `UNIFI_PERMISSIONS_VPN_SERVERS_CREATE` | `UNIFI_PERMISSIONS_VPN_SERVERS_UPDATE` |
+| **routing** | `UNIFI_PERMISSIONS_ROUTING_CREATE` | `UNIFI_PERMISSIONS_ROUTING_UPDATE` |
+| **usergroups** | `UNIFI_PERMISSIONS_USERGROUPS_CREATE` | `UNIFI_PERMISSIONS_USERGROUPS_UPDATE` |
+| **vouchers** | `UNIFI_PERMISSIONS_VOUCHERS_CREATE` | `UNIFI_PERMISSIONS_VOUCHERS_UPDATE` |
+| **vpn** | `UNIFI_PERMISSIONS_VPN_CREATE` | `UNIFI_PERMISSIONS_VPN_UPDATE` |
+| **events** | `UNIFI_PERMISSIONS_EVENTS_CREATE` | `UNIFI_PERMISSIONS_EVENTS_UPDATE` |
+| **snmp** | N/A | `UNIFI_PERMISSIONS_SNMP_UPDATE` |
+
+`unifi_restart_controller` is gated on `system` / `admin`, so its variable is
+`UNIFI_PERMISSIONS_SYSTEM_ADMIN`.
 
 **Accepted Values:** `true`, `1`, `yes`, `on` (case-insensitive) = enabled; anything else = disabled
 
 ## Impact on Tool Discovery and Availability
 
-**Important:** Permissions are enforced at **runtime**, not build time!
+**Important:** Permissions decide **registration**, not the contents of the manifest.
 
-The tool manifest (`tools_manifest.json`) **always includes all 64 tools** regardless of permission settings. This ensures:
+The tool manifest (`tools_manifest.json`) lists the whole catalog regardless of permission settings. This ensures:
 
 1. ✅ **Users control permissions** via their own config.yaml
 2. ✅ **LLMs can discover all tools** via `unifi_tool_index`
-3. ✅ **Disabled tools appear in index but are not callable**
-4. ✅ **Permissions enforced when tools are called**
+3. ✅ **Withheld tools appear in the index marked `callable: false`**
+4. ✅ **Withheld tools are never registered, so they cannot be invoked**
+
+`unifi_tool_index` reports the live count alongside `callable_count` and a
+`blocked_by_permissions` list, so it answers "what can this server actually do"
+without anyone having to keep a number in prose up to date.
 
 ### How It Works
 
@@ -197,22 +225,22 @@ When the server starts:
 1. **All tools registered in TOOL_REGISTRY** (for discovery)
 2. **Permission check determines MCP registration**:
    - ✅ Allowed: Tool is callable via MCP
-   - ❌ Denied: Tool appears in index but returns permission error
+   - ❌ Denied: Tool appears in the index flagged `callable: false` and is not registered
 
 Example server startup output:
 
 ```
-[permissions] Skipping MCP registration of tool 'unifi_create_network' (category=networks, action=create)
-[permissions] Skipping MCP registration of tool 'unifi_adopt_device' (category=devices, action=create)
+[permissions] Skipping MCP registration of tool 'unifi_delete_static_route' (category=routing, action=delete)
+[permissions] Skipping MCP registration of tool 'unifi_restart_controller' (category=system, action=admin)
 ...
 ```
 
 ### User Experience
 
-**If a tool is disabled:**
-- ✅ Appears in `unifi_tool_index` results
-- ❌ Cannot be called via MCP (not registered with server)
-- 💡 LLM will see it exists but cannot invoke it
+**If a tool is withheld:**
+- ✅ Appears in `unifi_tool_index` results, flagged `callable: false`
+- ❌ Cannot be called via MCP (never registered with the server)
+- 💡 The LLM sees it exists but cannot invoke it
 
 **Why this design:**
 - Users configure their own permissions
@@ -238,66 +266,87 @@ Example server startup output:
 |--------|-------------------|
 | **create** | Add new resources (networks, rules, etc.) |
 | **update** | Modify existing resources (rename, toggle, change config) |
-| **delete** | Remove resources (typically uses "update" permission) |
+| **delete** | Remove resources. Refused unconditionally |
+| **admin** | Controller-level operations such as restarting the controller |
 
-Note: `delete` operations typically use the `update` permission since they modify the resource list.
+Note: `delete` is not a permission you can grant. `parse_permission()` returns
+`False` for it before consulting the environment or the config file, so the four
+delete tools are never registered no matter what any file says.
 
 ## Tools by Permission
 
-### Networks (Disabled by Default)
-- ❌ `unifi_create_network`
-- ❌ `unifi_update_network`
-- ✅ `unifi_list_networks` (no permission required)
-- ✅ `unifi_get_network_details` (no permission required)
+Read-only tools carry no permission requirement and are always registered.
+The tools below are gated; `unifi_tool_index` reports which ones the running
+server accepted.
 
-### WLANs (Disabled by Default)
-- ❌ `unifi_create_wlan`
-- ❌ `unifi_update_wlan`
-- ✅ `unifi_list_wlans` (no permission required)
+### Networks (`networks`)
+- `unifi_create_network` (create)
+- `unifi_update_network` (update)
+- `unifi_list_networks`, `unifi_get_network_details` (no permission required)
 
-### Devices (Disabled by Default)
-- ❌ `unifi_adopt_device`
-- ❌ `unifi_upgrade_device`
-- ❌ `unifi_reboot_device`
-- ❌ `unifi_rename_device`
-- ✅ `unifi_list_devices` (no permission required)
+### WLANs (`wlans`)
+- `unifi_create_wlan` (create)
+- `unifi_update_wlan` (update)
+- `unifi_list_wlans`, `unifi_get_wlan_details` (no permission required)
 
-### Clients (Disabled by Default)
-- ❌ `unifi_block_client`
-- ❌ `unifi_unblock_client`
-- ❌ `unifi_force_reconnect_client`
-- ❌ `unifi_authorize_guest`
-- ❌ `unifi_unauthorize_guest`
-- ✅ `unifi_list_clients` (no permission required)
-- ✅ `unifi_rename_client` (no permission check)
+### Devices (`devices`)
+- `unifi_manage_device` — registration is gated on `devices.update`. The
+  `adopt` action additionally requires `devices.create`; `reboot`, `rename`,
+  `locate`, `upgrade` and `set_radio` require `devices.update`. Folding several
+  operations behind one tool does not widen what the permission file allows.
+- `unifi_list_devices`, `unifi_get_device_details` (no permission required)
 
-### Firewall Policies (Enabled by Default)
-- ✅ `unifi_create_firewall_policy`
-- ✅ `unifi_update_firewall_policy`
-- ✅ `unifi_toggle_firewall_policy`
-- ✅ `unifi_create_simple_firewall_policy`
+### Clients (`clients`)
+- `unifi_block_client`, `unifi_unblock_client`, `unifi_force_reconnect_client`,
+  `unifi_authorize_guest`, `unifi_unauthorize_guest`,
+  `unifi_set_client_ip_settings` (update)
+- `unifi_list_clients`, `unifi_get_client_details`, `unifi_rename_client`,
+  `unifi_lookup_by_ip` (no permission check)
 
-### Traffic Routes (Enabled by Default)
-- ✅ `unifi_create_traffic_route`
-- ✅ `unifi_update_traffic_route`
-- ✅ `unifi_toggle_traffic_route`
-- ✅ `unifi_create_simple_traffic_route`
+### Firewall Policies (`firewall_policies`)
+- `unifi_create_firewall_policy` (create)
+- `unifi_update_firewall_policy`, `unifi_toggle_firewall_policy` (update)
 
-### Port Forwards (Enabled by Default)
-- ✅ `unifi_create_port_forward`
-- ✅ `unifi_update_port_forward`
-- ✅ `unifi_toggle_port_forward`
-- ✅ `unifi_create_simple_port_forward`
+### Traffic Routes (`traffic_routes`)
+- `unifi_create_traffic_route` (create)
+- `unifi_update_traffic_route` (update)
+- `unifi_delete_traffic_route` (delete — always refused)
 
-### QoS Rules (Enabled by Default)
-- ✅ `unifi_create_qos_rule`
-- ✅ `unifi_update_qos_rule`
-- ✅ `unifi_toggle_qos_rule_enabled`
-- ✅ `unifi_create_simple_qos_rule`
+### Static Routes (`routing`)
+- `unifi_create_static_route` (create)
+- `unifi_update_static_route` (update)
+- `unifi_delete_static_route` (delete — always refused)
 
-### VPN (Mixed)
-- ✅ `unifi_update_vpn_client_state` (vpn_clients: enabled)
-- ✅ `unifi_update_vpn_server_state` (vpn_servers: update only)
+### Port Forwards (`port_forwards`)
+- `unifi_create_port_forward` (create)
+- `unifi_update_port_forward`, `unifi_toggle_port_forward` (update)
+
+### QoS Rules (`qos_rules`)
+- `unifi_create_qos_rule` (create)
+- `unifi_update_qos_rule`, `unifi_toggle_qos_rule_enabled` (update)
+
+### VPN (`vpn`)
+- `unifi_create_vpn_config` (create)
+- `unifi_update_vpn_config` (update)
+- `unifi_delete_vpn_config` (delete — always refused)
+
+### User Groups (`usergroups`)
+- `unifi_create_user_group` (create)
+- `unifi_update_user_group` (update)
+- `unifi_delete_user_group` (delete — always refused)
+
+### Vouchers (`vouchers`)
+- `unifi_create_voucher` (create)
+- `unifi_revoke_voucher` (update)
+
+### Events (`events`)
+- `unifi_archive_alarm`, `unifi_archive_all_alarms` (update)
+- `unifi_list_events`, `unifi_list_alarms`, `unifi_get_event_types`
+  (no permission required)
+
+### System
+- `unifi_update_snmp_settings` (`snmp.update`)
+- `unifi_restart_controller` (`system.admin`)
 
 ## Best Practices
 
@@ -309,17 +358,20 @@ Note: `delete` operations typically use the `update` permission since they modif
 
 ## Troubleshooting
 
-### Tool Not Appearing in tool_index
+### Tool Listed but Not Callable
 
-**Symptom:** A tool is missing from `unifi_tool_index` results
+**Symptom:** A tool appears in `unifi_tool_index` flagged `callable: false`, or
+in the `blocked_by_permissions` list, and the client does not offer it
 
-**Cause:** Permission is set to `false` in config.yaml
+**Cause:** Its permission resolved to `false`, so it was never registered
 
 **Solution:**
-1. Check `src/config/config.yaml` for the permission setting
-2. Enable the permission if appropriate
-3. Regenerate manifest: `make manifest`
-4. Restart the MCP server
+1. Check the category and action in the table above
+2. Set `UNIFI_PERMISSIONS_<CATEGORY>_<ACTION>=true`, or enable it in
+   `src/config/config.yaml`
+3. Restart the MCP server
+
+A `delete` tool cannot be recovered this way: the refusal is in code.
 
 ### Permission Denied at Runtime
 
@@ -342,7 +394,7 @@ Planned for future releases:
 
 ## Confirmation System
 
-All mutating tools (create, update, toggle, delete operations) implement a **preview-then-confirm** pattern for safety:
+All mutating tools (create, update, toggle operations) implement a **preview-then-confirm** pattern for safety:
 
 ### How It Works
 
@@ -400,11 +452,19 @@ docker run -e UNIFI_AUTO_CONFIRM=true ...
 ```
 
 When `UNIFI_AUTO_CONFIRM=true`:
-- All mutating operations execute immediately
-- Preview step is skipped
+- Reversible mutating operations execute immediately
+- Preview step is skipped for them
 - No changes to your workflow logic required
 
-**Accepted values:** `true`, `1`, `yes` (case-insensitive)
+**Accepted values:** `true`, `1`, `yes`, `on` (case-insensitive)
+
+### Actions That Always Require Confirmation
+
+`reboot`, `restart`, `upgrade`, `adopt`, `restore` and `set_radio` ignore
+`UNIFI_AUTO_CONFIRM` entirely and always require `confirm=true` in the call.
+They take effect at once and no later call undoes them; a radio change is on
+that list because it re-provisions the access point and drops every wireless
+client on the band.
 
 ### Dev Console Behavior
 

@@ -164,24 +164,38 @@ async def get_client_stats(
 
 @server.tool(
     name="unifi_get_ap_stats",
-    description="Estatísticas dos access points do site UniFi Network — por AP, com CPU, memória, uptime, clientes conectados, canal, utilização de canal e potência de transmissão por rádio, mais série horária de tráfego. Use quando precisar monitorar APs, analisar cobertura ou diagnosticar RF. Retorna uma linha por access point adotado no controlador UniFi.",
+    description="Estatísticas completas dos access points do site UniFi Network — por AP: CPU, memória, uptime e tráfego; por rádio: canal em uso e canal configurado, largura em uso e configurada, potência e seus limites, ocupação do ar separada entre o próprio AP e terceiros, retransmissões, satisfação, streams espaciais e suporte a DFS e 160MHz; por SSID: BSSID, clientes, sinal médio e erros. Use quando precisar escolher canal, diagnosticar interferência, dimensionar cobertura ou justificar uma mudança de RF. Com include_channel_survey=true acrescenta, por banda, quantos vizinhos ocupam cada canal permitido e qual o mais forte no controlador UniFi.",
 )
-async def get_ap_stats(duration_hours: int = 24, site: Optional[str] = None) -> Dict[str, Any]:
-    """Per-access-point statistics.
+async def get_ap_stats(
+    duration_hours: int = 24,
+    site: Optional[str] = None,
+    include_channel_survey: bool = False,
+    survey_min_signal_dbm: int = -80,
+) -> Dict[str, Any]:
+    """Per-access-point statistics, radios and broadcast SSIDs.
 
     Args:
-        duration_hours: Length of the traffic series window.
+        duration_hours: Window for the traffic series, and for how far back a
+            neighbour scan row still counts.
         site: Site slug or display name.
+        include_channel_survey: Also return, per band, which channels carry a
+            neighbour loud enough to take airtime. Off by default because it
+            queries the neighbour scan, which on a busy site is hundreds of rows.
+        survey_min_signal_dbm: Floor for a neighbour to count as competing.
+            Defaults to -80 dBm. A count that includes every distant beacon
+            argues for moving off a channel that is in fact empty: one site
+            heard 142 networks on 5GHz channel 161, none above -80 dBm, while
+            the radio measured 1% airtime used by others.
     """
     try:
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
         aps = await stats_manager.get_ap_stats(duration_hours=duration_hours, site=site_slug)
-        return inject_site_metadata(
-            {"success": True, "count": len(aps), "ap_stats": aps},
-            site_id,
-            site_name,
-            site_slug,
-        )
+        result: Dict[str, Any] = {"success": True, "count": len(aps), "ap_stats": aps}
+        if include_channel_survey:
+            result["channel_survey"] = await stats_manager.get_channel_survey(
+                duration_hours=duration_hours, site=site_slug, min_signal_dbm=survey_min_signal_dbm
+            )
+        return inject_site_metadata(result, site_id, site_name, site_slug)
     except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
         raise
     except Exception as e:

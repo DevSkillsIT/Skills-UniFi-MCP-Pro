@@ -284,7 +284,7 @@ async def create_static_route(
 
 @server.tool(
     name="unifi_update_static_route",
-    description="Atualização de rota estática UniFi Network via ID — modificação de campos de destino, gateway ou parâmetros de roteamento com confirmação obrigatória. Use quando precisar ajustar rota ou modificar next-hop. Executa update parcial de static route no controlador UniFi com suporte multi-site.",
+    description="Rotas estáticas do UniFi Network — altera destino, gateway (next-hop), distância e nome de uma rota por ID, e também ativa ou desativa a rota pelo campo enabled em update_data, sem excluí-la. Use quando precisar ajustar, habilitar ou desabilitar uma rota de roteamento. Exige confirmação e retorna os campos alterados lidos do controlador UniFi, com suporte multi-site.",
     permission_category="routing",
     permission_action="update",
 )
@@ -296,7 +296,10 @@ async def update_static_route(
 
     Args:
         route_id: The unique identifier (_id) of the static route to update
-        update_data: Dictionary of fields to update
+        update_data: Fields to change, keyed by any spelling in _ROUTE_FIELD_ALIASES.
+            "enabled" is one of them: the controller stores the on/off state as an
+            ordinary field of the route object, so turning a route off is a change
+            of that field and not a separate operation.
         confirm: Must be set to True to execute
         site: Optional site name/slug. If None, uses current default site
 
@@ -464,122 +467,4 @@ async def delete_static_route(route_id: str, confirm: bool = False, site: Option
         raise
     except Exception as e:
         logger.error(f"Error deleting static route {route_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_enable_static_route",
-    description="Ativação de rota estática UniFi Network via ID — habilita destino de rede, gateway ou configuração de roteamento temporariamente desabilitado. Use quando precisar ativar rota específica ou restaurar direcionamento de tráfego. Executa enable de static route no controlador UniFi com suporte multi-site.",
-    permission_category="routing",
-    permission_action="update",
-)
-async def enable_static_route(route_id: str, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for enabling static route with multi-site support.
-
-    Args:
-        route_id: The _id of the static route to enable
-        site: Optional site name/slug. If None, uses current default site
-
-    Returns:
-        Dict with operation result and site metadata
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    if not parse_permission(config.permissions, "routing", "update"):
-        logger.warning(f"Permission denied for enabling static route ({route_id}).")
-        return {"success": False, "error": "Permission denied to enable static route."}
-
-    try:
-        # Resolve site context and get metadata
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-
-        success = await routing_manager.enable_route(route_id, site=site_slug)
-        if success:
-            return inject_site_metadata(
-                {
-                    "success": True,
-                    "message": f"Static route {route_id} enabled successfully",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-        else:
-            return inject_site_metadata(
-                {
-                    "success": False,
-                    "error": f"Failed to enable static route {route_id}",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-    except Exception as e:
-        logger.error(f"Error enabling static route {route_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_disable_static_route",
-    description="Desativação de rota estática UniFi Network via ID — desabilita destino de rede, gateway ou configuração de roteamento temporariamente. Use quando precisar desativar rota específica ou interromper direcionamento de tráfego. Executa disable de static route no controlador UniFi com suporte multi-site.",
-    permission_category="routing",
-    permission_action="update",
-)
-async def disable_static_route(route_id: str, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for disabling static route with multi-site support.
-
-    Args:
-        route_id: The _id of the static route to disable
-        site: Optional site name/slug. If None, uses current default site
-
-    Returns:
-        Dict with operation result and site metadata
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    if not parse_permission(config.permissions, "routing", "update"):
-        logger.warning(f"Permission denied for disabling static route ({route_id}).")
-        return {"success": False, "error": "Permission denied to disable static route."}
-
-    try:
-        # Resolve site context and get metadata
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-
-        success = await routing_manager.disable_route(route_id, site=site_slug)
-        if success:
-            return inject_site_metadata(
-                {
-                    "success": True,
-                    "message": f"Static route {route_id} disabled successfully",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-        else:
-            return inject_site_metadata(
-                {
-                    "success": False,
-                    "error": f"Failed to disable static route {route_id}",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-    except Exception as e:
-        logger.error(f"Error disabling static route {route_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

@@ -222,21 +222,28 @@ async def create_vpn_config(
 
 @server.tool(
     name="unifi_update_vpn_config",
-    description="Atualização de configuração VPN UniFi Network via ID — modificação de túnel, endpoints ou parâmetros de conectividade com confirmação obrigatória. Use quando precisar ajustar VPN ou modificar túnel. Executa update parcial de VPN config no controlador UniFi com suporte multi-site.",
+    description="Configurações VPN do UniFi Network — altera túnel site-to-site, acesso remoto, endpoints e parâmetros de uma VPN por ID, e também liga ou desliga o túnel pelo parâmetro enabled, sem removê-lo. Use quando precisar ajustar, habilitar ou desabilitar uma VPN. Exige confirmação e retorna os campos alterados lidos do controlador UniFi, com suporte multi-site.",
     permission_category="vpn",
     permission_action="update",
 )
 async def update_vpn_config(
-    config_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+    config_id: str,
+    update_data: Optional[Dict[str, Any]] = None,
+    confirm: bool = False,
+    site: Optional[str] = None,
+    enabled: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """
     Implementation for updating VPN configuration with multi-site support.
 
     Args:
         config_id: The unique identifier (_id) of the VPN configuration to update
-        update_data: Dictionary of fields to update
+        update_data: Dictionary of fields to update. Optional when only `enabled` changes
         confirm: Must be set to True to execute
         site: Optional site name/slug. If None, uses current default site
+        enabled: Target on/off state of the tunnel. The controller keeps this as an
+            ordinary field of the networkconf record, so the state travels in the
+            same body as every other field rather than through its own endpoint
 
     Returns:
         Dict with operation result and site metadata
@@ -252,15 +259,25 @@ async def update_vpn_config(
 
     if not config_id:
         return {"success": False, "error": "config_id is required"}
-    if not update_data:
-        return {"success": False, "error": "update_data cannot be empty"}
+
+    # A named argument states the intent more precisely than a key buried in the
+    # free-form payload, so it outranks an "enabled" carried inside update_data.
+    changes: Dict[str, Any] = dict(update_data or {})
+    if enabled is not None:
+        changes["enabled"] = enabled
+
+    if not changes:
+        return {
+            "success": False,
+            "error": "nothing to change: supply update_data fields, enabled, or both",
+        }
 
     try:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Validate the update data
-        is_valid, error_msg, validated_data = _validate_optional("vpn_config_update", update_data)
+        # Validate everything that will be sent, the enabled flag included
+        is_valid, error_msg, validated_data = _validate_optional("vpn_config_update", changes)
         if not is_valid:
             logger.warning(f"Invalid VPN configuration update data for ID {config_id}: {error_msg}")
             return {"success": False, "error": f"Invalid update data: {error_msg}"}
@@ -390,122 +407,4 @@ async def delete_vpn_config(config_id: str, confirm: bool = False, site: Optiona
         raise
     except Exception as e:
         logger.error(f"Error deleting VPN configuration {config_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_enable_vpn_config",
-    description="Habilitação de configuração VPN UniFi Network via ID — ativação de túnel site-to-site, acesso remoto ou conectividade segura previamente desabilitada. Use quando precisar ativar VPN, restaurar túnel ou habilitar acesso remoto. Executa enable de VPN config no controlador UniFi com suporte multi-site.",
-    permission_category="vpn",
-    permission_action="update",
-)
-async def enable_vpn_config(config_id: str, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for enabling VPN configuration with multi-site support.
-
-    Args:
-        config_id: The _id of the VPN configuration to enable
-        site: Optional site name/slug. If None, uses current default site
-
-    Returns:
-        Dict with operation result and site metadata
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    if not parse_permission(config.permissions, "vpn", "update"):
-        logger.warning(f"Permission denied for enabling VPN configuration ({config_id}).")
-        return {"success": False, "error": "Permission denied to enable VPN configuration."}
-
-    try:
-        # Resolve site context and get metadata
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-
-        success = await vpn_manager.enable_vpn_config(config_id, site=site_slug)
-        if success:
-            return inject_site_metadata(
-                {
-                    "success": True,
-                    "message": f"VPN configuration {config_id} enabled successfully",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-        else:
-            return inject_site_metadata(
-                {
-                    "success": False,
-                    "error": f"Failed to enable VPN configuration {config_id}",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-    except Exception as e:
-        logger.error(f"Error enabling VPN configuration {config_id}: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_disable_vpn_config",
-    description="Desabilitação de configuração VPN UniFi Network via ID — desativação temporária de túnel site-to-site, acesso remoto ou conectividade segura sem remoção permanente. Use quando precisar desativar VPN, pausar túnel ou suspender acesso remoto. Executa disable de VPN config no controlador UniFi com suporte multi-site.",
-    permission_category="vpn",
-    permission_action="update",
-)
-async def disable_vpn_config(config_id: str, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for disabling VPN configuration with multi-site support.
-
-    Args:
-        config_id: The _id of the VPN configuration to disable
-        site: Optional site name/slug. If None, uses current default site
-
-    Returns:
-        Dict with operation result and site metadata
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    if not parse_permission(config.permissions, "vpn", "update"):
-        logger.warning(f"Permission denied for disabling VPN configuration ({config_id}).")
-        return {"success": False, "error": "Permission denied to disable VPN configuration."}
-
-    try:
-        # Resolve site context and get metadata
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-
-        success = await vpn_manager.disable_vpn_config(config_id, site=site_slug)
-        if success:
-            return inject_site_metadata(
-                {
-                    "success": True,
-                    "message": f"VPN configuration {config_id} disabled successfully",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-        else:
-            return inject_site_metadata(
-                {
-                    "success": False,
-                    "error": f"Failed to disable VPN configuration {config_id}",
-                },
-                site_id,
-                site_name,
-                site_slug,
-            )
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-    except Exception as e:
-        logger.error(f"Error disabling VPN configuration {config_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

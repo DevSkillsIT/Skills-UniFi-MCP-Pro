@@ -13,6 +13,7 @@ import os
 import sys
 import traceback
 
+import uvicorn
 import uvicorn.config
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -34,6 +35,7 @@ from src.runtime import (
 from src.tool_index import register_tool, tool_index_handler
 from src.utils.config_helpers import parse_config_bool
 from src.utils.diagnostics import diagnostics_enabled, wrap_tool
+from src.utils.http_auth import BearerTokenMiddleware, configured_token
 from src.utils.lazy_tool_loader import setup_lazy_loading
 from src.utils.meta_tools import register_load_tools, register_meta_tools
 from src.utils.permissions import parse_permission  # noqa: E402
@@ -381,7 +383,28 @@ async def main_async():
                     port,
                     streamable_path,
                 )
-                await server.run_streamable_http_async()
+
+                token = configured_token()
+                app = server.streamable_http_app()
+                if token:
+                    app = BearerTokenMiddleware(app, token)
+                    logger.info("Streamable HTTP requires a bearer token (UNIFI_MCP_BEARER_TOKEN).")
+                else:
+                    logger.warning(
+                        "UNIFI_MCP_BEARER_TOKEN is not set: %s:%s%s accepts unauthenticated requests, "
+                        "including the tools that reboot devices and rewrite configuration.",
+                        host,
+                        port,
+                        streamable_path,
+                    )
+
+                config_uvicorn = uvicorn.Config(
+                    app,
+                    host=host,
+                    port=port,
+                    log_level=config.server.get("log_level", "INFO").lower(),
+                )
+                await uvicorn.Server(config_uvicorn).serve()
             except Exception as http_e:
                 logger.error(f"Streamable HTTP server failed to start: {http_e}")
                 logger.error(traceback.format_exc())

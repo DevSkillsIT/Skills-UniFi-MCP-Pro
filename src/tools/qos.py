@@ -404,7 +404,7 @@ async def update_qos_rule(
 
 @server.tool(
     name="unifi_create_qos_rule",
-    description="Criação de regra de QoS UniFi Network com validação — nova política de qualidade de serviço, priorização de tráfego ou limite de banda com confirmação obrigatória. Use quando precisar adicionar QoS rule, configurar priorização ou implementar bandwidth limit. Cria regra de QoS validada no controlador UniFi com suporte multi-site.",
+    description="Regras de QoS, priorização e limite de banda no UniFi Network — criação por forma compacta (limit_kbps com alvo por IP ou sub-rede) ou por payload completo (bandwidth_limit_kbps), detectada automaticamente pelo formato enviado. Use quando precisar limitar velocidade, priorizar tráfego ou reservar banda. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
     permission_category="qos_rules",
     permission_action="create",
 )
@@ -413,25 +413,38 @@ async def create_qos_rule(
     confirm: bool = False,
     site: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Creates a new Quality of Service (QoS) rule with schema validation. Requires confirmation.
+    """Create a QoS rule from either a compact or a complete definition.
 
-    Args:
-        qos_data: Dictionary containing the QoS rule configuration.
-            Required fields:
-            - name (string): Descriptive name for the QoS rule.
-            - interface (string): Network interface (e.g., 'WAN', 'LAN').
-            - direction (string): Direction ('upload' or 'download').
-            - bandwidth_limit_kbps (integer): Bandwidth limit in Kbps.
+    Two input shapes are accepted in `qos_data`; the shape is detected from the
+    keys, never declared by the caller.
 
-            Optional fields:
-            - target_ip_address (string): Specific IP address target.
-            - target_subnet (string): Subnet target (CIDR notation).
-            - dscp_value (integer): DSCP value (0-63).
-            - enabled (boolean): Whether the rule is enabled (default: true).
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
-        site (Optional[str]): Site name/slug. If None, uses the default site.
+    **Compact shape** -- one bandwidth ceiling and an optional traffic selector:
+    {
+        "name": "Zoom Upload Limit",
+        "interface": "wan",
+        "direction": "upload",
+        "limit_kbps": 2000,
+        "enabled": True,             # optional, default True
+        "dscp_value": 46,            # optional
+        "target": {                  # optional, omit for every client on the interface
+            "type": "ip",          # "ip" | "subnet"
+            "value": "192.168.1.50"
+        }
+    }
 
-    Example:
+    **Complete shape** -- the fields the controller names:
+    - name (string): Descriptive name for the QoS rule.
+    - interface (string): Network interface (e.g., 'WAN', 'LAN').
+    - direction (string): Direction ('upload' or 'download').
+    - bandwidth_limit_kbps (integer): Bandwidth limit in Kbps.
+
+    Optional in the complete shape:
+    - target_ip_address (string): Specific IP address target.
+    - target_subnet (string): Subnet target (CIDR notation).
+    - dscp_value (integer): DSCP value (0-63).
+    - enabled (boolean): Whether the rule is enabled (default: true).
+
+    Example (complete shape):
     {
         "name": "Zoom Meetings High Priority",
         "interface": "WAN",
@@ -442,8 +455,15 @@ async def create_qos_rule(
         "enabled": true
     }
 
+    Args:
+        qos_data: The QoS rule configuration, in either shape.
+        confirm (bool): Must be set to `True` to execute. Defaults to `False`, which
+                        returns the expanded payload as a preview.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
+
     Returns:
     - success (boolean): Whether the operation succeeded.
+    - message (string): Confirmation message on success.
     - rule_id (string): ID of the created rule if successful.
     - details (object): Details of the created rule.
     - error (string): Error message if unsuccessful.
@@ -452,31 +472,66 @@ async def create_qos_rule(
         logger.warning("Permission denied for creating QoS rule.")
         return {"success": False, "error": "Permission denied to create QoS rule."}
 
-    # Validate the input data
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("qos_rule", qos_data)
-    if not is_valid:
-        logger.warning(f"Invalid QoS rule data: {error_msg}")
-        return {"success": False, "error": f"Invalid data: {error_msg}"}
+    # "limit_kbps" exists only in the compact shape -- the controller shape spells it
+    # "bandwidth_limit_kbps". Choosing the schema from that marker keeps a validation
+    # error attributable to the shape the caller actually sent.
+    is_compact = "limit_kbps" in qos_data
 
-    # Basic required field check (covered by schema, but belt-and-suspenders)
-    required = ["name", "interface", "direction", "bandwidth_limit_kbps"]
-    if not all(k in validated_data for k in required):
-        missing = [k for k in required if k not in validated_data]
-        return {"success": False, "error": f"Missing required fields: {missing}"}
+    if is_compact:
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("qos_rule_simple", qos_data)
+        if not is_valid or validated_data is None:
+            logger.warning(f"Invalid compact QoS rule data: {error_msg}")
+            return {"success": False, "error": f"Invalid data: {error_msg}"}
+
+        rule_payload: Dict[str, Any] = {
+            "name": validated_data["name"],
+            "interface": validated_data["interface"],
+            "direction": validated_data["direction"],
+            "bandwidth_limit_kbps": validated_data["limit_kbps"],
+            "enabled": validated_data.get("enabled", True),
+        }
+
+        if "dscp_value" in validated_data:
+            rule_payload["dscp_value"] = validated_data["dscp_value"]
+
+        target = validated_data.get("target")
+        if target:
+            t_type = target["type"].lower()
+            value = target["value"]
+            if t_type == "ip":
+                rule_payload["target_ip_address"] = value
+            elif t_type == "subnet":
+                rule_payload["target_subnet"] = value
+            else:
+                return {"success": False, "error": f"Unsupported target type '{t_type}'"}
+    else:
+        # Validate the input data
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("qos_rule", qos_data)
+        if not is_valid or validated_data is None:
+            logger.warning(f"Invalid QoS rule data: {error_msg}")
+            return {"success": False, "error": f"Invalid data: {error_msg}"}
+
+        # Basic required field check (covered by schema, but belt-and-suspenders)
+        required = ["name", "interface", "direction", "bandwidth_limit_kbps"]
+        if not all(k in validated_data for k in required):
+            missing = [k for k in required if k not in validated_data]
+            return {"success": False, "error": f"Missing required fields: {missing}"}
+
+        rule_payload = validated_data
 
     if not confirm and not should_auto_confirm():
         return create_preview(
             resource_type="qos_rule",
-            resource_data=validated_data,
-            resource_name=validated_data.get("name"),
+            resource_data=rule_payload,
+            resource_name=rule_payload.get("name"),
         )
 
-    rule_name = validated_data["name"]
+    rule_name = rule_payload["name"]
     logger.info(f"Attempting to create QoS rule '{rule_name}'")
     try:
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        created_rule = await qos_manager.create_qos_rule(validated_data, site=site_slug)
+        created_rule = await qos_manager.create_qos_rule(rule_payload, site=site_slug)
 
         # A rule id is only reported when the controller echoed back the stored object
         if created_rule and created_rule.get("_id"):
@@ -507,104 +562,3 @@ async def create_qos_rule(
     except Exception as e:
         logger.error(f"Error creating QoS rule '{rule_name}': {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_create_simple_qos_rule",
-    description="Criação simplificada de regra de QoS UniFi Network — nova política de qualidade de serviço via schema compacto com preview automático e confirmação obrigatória. Use quando precisar criar QoS rule rapidamente, configurar priorização básica ou implementar limite simples. Cria regra de QoS com schema simplificado no controlador UniFi.",
-    permission_category="qos_rules",
-    permission_action="create",
-)
-async def create_simple_qos_rule(
-    rule: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
-) -> Dict[str, Any]:
-    """Create a QoS rule with a compact schema and optional preview.
-
-    High-level schema (validated internally):
-    {
-        "name": "Zoom Upload Limit",
-        "interface": "wan",
-        "direction": "upload",
-        "limit_kbps": 2000,
-        "enabled": true,             # optional – default true
-        "dscp_value": 46,            # optional
-        "target": {                  # optional – omit for all clients
-            "type": "ip",          # "ip" | "subnet"
-            "value": "192.168.1.50"
-        }
-    }
-
-    If *confirm* is False (default) the function only validates and returns the
-    fully-expanded UniFi payload in a preview. Set *confirm* to True to commit
-    the rule and return the controller's response.
-
-    Args:
-        rule (Dict[str, Any]): Compact QoS rule definition.
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
-        site (Optional[str]): Site name/slug. If None, uses the default site.
-    """
-
-    if not parse_permission(config.permissions, "qos", "create"):
-        return {"success": False, "error": "Permission denied."}
-
-    # --- Step 1: validate high-level schema --------------------------------
-    is_valid, error_msg, validated = UniFiValidatorRegistry.validate("qos_rule_simple", rule)
-    if not is_valid or validated is None:
-        return {"success": False, "error": error_msg or "Validation failed"}
-
-    r = validated  # alias for brevity
-
-    # --- Step 2: translate into controller payload -------------------------
-    payload: Dict[str, Any] = {
-        "name": r["name"],
-        "interface": r["interface"],
-        "direction": r["direction"],
-        "bandwidth_limit_kbps": r["limit_kbps"],
-        "enabled": r.get("enabled", True),
-    }
-
-    if "dscp_value" in r:
-        payload["dscp_value"] = r["dscp_value"]
-
-    target = r.get("target")
-    if target:
-        t_type = target["type"].lower()
-        value = target["value"]
-        if t_type == "ip":
-            payload["target_ip_address"] = value
-        elif t_type == "subnet":
-            payload["target_subnet"] = value
-        else:
-            return {"success": False, "error": f"Unsupported target type '{t_type}'"}
-
-    # --- Step 3: preview or commit -----------------------------------------
-    if not confirm and not should_auto_confirm():
-        return {
-            "success": True,
-            "preview": payload,
-            "message": "Set confirm=true to apply.",
-        }
-
-    try:
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-
-    created = await qos_manager.create_qos_rule(payload, site=site_slug)
-    if created is None or not isinstance(created, dict):
-        return {
-            "success": False,
-            "error": "Controller rejected QoS rule creation. See logs.",
-        }
-
-    return inject_site_metadata(
-        {
-            "success": True,
-            "rule_id": created.get("_id"),
-            "details": json.loads(json.dumps(created, default=str)),
-        },
-        site_id,
-        site_name,
-        site_slug,
-    )

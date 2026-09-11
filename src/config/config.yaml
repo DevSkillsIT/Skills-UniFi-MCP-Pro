@@ -103,9 +103,10 @@ permissions:
 
   devices:
     create: true   # Adoption / provisioning
-    update: true   # Reboot, firmware upgrade, rename.
-                   # NOTE: with UNIFI_AUTO_CONFIRM=true, unifi_reboot_device executes
-                   # on the first call -- the preview step is skipped entirely.
+    update: true   # Reboot, firmware upgrade, rename, locate, radio settings.
+                   # Reboot, upgrade, adopt and radio changes always require
+                   # confirm=true, whatever UNIFI_AUTO_CONFIRM says: they take
+                   # effect at once and no later call undoes them.
 
   clients:
     create: true   # Not applicable, but kept for symmetry

@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from src.runtime import config, firewall_manager, server, system_manager
-from src.utils.confirmation import should_auto_confirm, toggle_preview, update_preview
+from src.utils.confirmation import create_preview, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission
 from src.utils.site_context import resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry  # Added for validation
@@ -271,32 +271,41 @@ async def toggle_port_forward(
 # Create Port Forward
 @server.tool(
     name="unifi_create_port_forward",
-    description="Criação de regra de port forwarding UniFi Network com validação — novo redirecionamento de porta, mapeamento NAT ou exposição de serviço com confirmação obrigatória. Use quando precisar adicionar port forward, configurar NAT ou expor serviço interno. Cria regra de redirecionamento validada no controlador UniFi com suporte multi-site.",
+    description="Port forwarding e NAT no UniFi Network — criação de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd_ip), detectada automaticamente pelo formato enviado. Use quando precisar expor serviço interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
     permission_category="port_forwards",
     permission_action="create",
 )
 async def create_port_forward(
-    port_forward_data: Dict[str, Any], site: Optional[str] = None
+    port_forward_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Create a new port forwarding rule with comprehensive validation.
+    """Create a port forwarding rule from either a compact or a complete definition.
 
-    Args:
-        port_forward_data: The rule configuration described below.
-        site: Optional site name/slug. If None, uses current default site.
+    Two input shapes are accepted in `port_forward_data`; the shape is detected from
+    the keys, never declared by the caller.
 
-    Required parameters in port_forward_data:
+    **Compact shape** -- external port and destination host, the rest defaulted:
+    {
+        "name": "Home Web",
+        "ext_port": "8443",
+        "to_ip": "192.168.1.10",
+        "int_port": "443",          # optional (defaults to ext_port)
+        "protocol": "tcp",          # optional: "tcp", "udp", "both" (default "both")
+        "enabled": True             # optional (default True)
+    }
+
+    **Complete shape** -- the fields the controller names:
     - name (string): Name for the port forwarding rule
     - dst_port (string): Destination/external port (e.g., "80", "443", "22" or range "10000-10010")
     - fwd_port (string): Internal port to forward to (e.g., "80", "8080" or range "10000-10010")
     - fwd_ip (string): Internal IP address to forward to
 
-    Optional parameters in port_forward_data:
+    Optional in the complete shape:
     - protocol (string): Network protocol - "tcp", "udp", or "tcp_udp" (default: "tcp_udp")
     - enabled (boolean): Whether rule is enabled initially (default: true)
     - src_ip (string): Source IP/CIDR to match (default: any)
     - log (boolean): Whether to log rule matches (default: false)
 
-    Example:
+    Example (complete shape):
     {
         "name": "Web Server",
         "dst_port": "80",
@@ -306,8 +315,14 @@ async def create_port_forward(
         "enabled": true
     }
 
+    Args:
+        port_forward_data: The rule configuration, in either shape.
+        confirm: Must be True to apply; otherwise the expanded payload is returned as a preview.
+        site: Optional site name/slug. If None, uses current default site.
+
     Returns:
     - success (boolean): Whether the operation succeeded
+    - message (string): Confirmation message on success
     - port_forward_id (string): ID of the created rule if successful
     - details (object): Additional details about the created rule
     - error (string): Error message if unsuccessful
@@ -316,28 +331,51 @@ async def create_port_forward(
         logger.warning("Permission denied for creating port forward.")
         return {"success": False, "error": "Permission denied to create port forward."}
 
-    from src.validator_registry import UniFiValidatorRegistry
+    # "ext_port"/"to_ip" exist only in the compact shape -- the controller shape
+    # spells them "dst_port"/"fwd_ip". Choosing the schema from those markers keeps
+    # a validation error attributable to the shape the caller actually sent.
+    is_compact = "ext_port" in port_forward_data or "to_ip" in port_forward_data
 
-    # Validate the input
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward", port_forward_data)
-    if not is_valid:
-        logger.warning(f"Invalid port forward data: {error_msg}")
-        return {"success": False, "error": error_msg}
+    if is_compact:
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate(
+            "port_forward_simple", port_forward_data
+        )
+        if not is_valid or validated_data is None:
+            logger.warning(f"Invalid compact port forward data: {error_msg}")
+            return {"success": False, "error": error_msg or "Validation failed"}
 
-    # Required fields check
-    required_fields = ["name", "dst_port", "fwd_port", "fwd_ip"]
-    missing_fields = [field for field in required_fields if field not in validated_data]
-    if missing_fields:
-        error = f"Missing required fields: {', '.join(missing_fields)}"
-        logger.warning(error)
-        return {"success": False, "error": error}
+        rule_name = validated_data["name"]
+        rule_data: Dict[str, Any] = {
+            "name": rule_name,
+            "dst_port": str(validated_data["ext_port"]),
+            "fwd_port": str(validated_data.get("int_port", validated_data["ext_port"])),
+            "fwd_ip": validated_data["to_ip"],
+            "protocol": {
+                "tcp": "tcp",
+                "udp": "udp",
+                "both": "tcp_udp",
+            }.get(validated_data.get("protocol", "both"), "tcp_udp"),
+            "enabled": validated_data.get("enabled", True),
+        }
+    else:
+        # Validate the input
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward", port_forward_data)
+        if not is_valid or validated_data is None:
+            logger.warning(f"Invalid port forward data: {error_msg}")
+            return {"success": False, "error": error_msg or "Validation failed"}
 
-    try:
-        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+        # Required fields check
+        required_fields = ["name", "dst_port", "fwd_port", "fwd_ip"]
+        missing_fields = [field for field in required_fields if field not in validated_data]
+        if missing_fields:
+            error = f"Missing required fields: {', '.join(missing_fields)}"
+            logger.warning(error)
+            return {"success": False, "error": error}
 
+        rule_name = validated_data["name"]
         # Prepare data for the manager
         rule_data = {
-            "name": validated_data["name"],
+            "name": rule_name,
             "dst_port": validated_data["dst_port"],
             "fwd_port": validated_data["fwd_port"],
             "fwd_ip": validated_data["fwd_ip"],
@@ -351,9 +389,19 @@ async def create_port_forward(
         if validated_data.get("src_ip"):
             rule_data["src"] = validated_data["src_ip"]
 
+    if not confirm and not should_auto_confirm():
+        return create_preview(
+            resource_type="port_forward",
+            resource_data=rule_data,
+            resource_name=rule_name,
+        )
+
+    try:
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
         logger.info(
-            f"Attempting to create port forward: {validated_data['name']} "
-            f"({rule_data['proto']} {validated_data['dst_port']} -> {validated_data['fwd_ip']}:{validated_data['fwd_port']})"
+            f"Attempting to create port forward: {rule_name} "
+            f"({rule_data.get('proto', rule_data.get('protocol'))} {rule_data['dst_port']} -> {rule_data['fwd_ip']}:{rule_data['fwd_port']})"
         )
 
         result = await firewall_manager.create_port_forward(rule_data, site=site_slug)
@@ -361,10 +409,10 @@ async def create_port_forward(
         if result:
             new_rule_id = result if isinstance(result, str) else result.get("_id", "unknown")
             details = result if isinstance(result, dict) else {"id": new_rule_id}
-            logger.info(f"Successfully created port forward '{validated_data['name']}' with ID {new_rule_id}")
+            logger.info(f"Successfully created port forward '{rule_name}' with ID {new_rule_id}")
             return {
                 "success": True,
-                "message": f"Port forward '{validated_data['name']}' created successfully.",
+                "message": f"Port forward '{rule_name}' created successfully.",
                 "port_forward_id": new_rule_id,
                 "details": json.loads(json.dumps(details, default=str)),
             }
@@ -374,15 +422,15 @@ async def create_port_forward(
                 if isinstance(result, dict)
                 else "Manager returned failure"
             )
-            logger.error(f"Failed to create port forward '{validated_data['name']}'. Reason: {error_msg}")
+            logger.error(f"Failed to create port forward '{rule_name}'. Reason: {error_msg}")
             return {
                 "success": False,
-                "error": f"Failed to create port forward '{validated_data['name']}'. {error_msg}",
+                "error": f"Failed to create port forward '{rule_name}'. {error_msg}",
             }
 
     except Exception as e:
         logger.error(
-            f"Error creating port forward '{validated_data.get('name', 'unknown')}': {e}",
+            f"Error creating port forward '{rule_name}': {e}",
             exc_info=True,
         )
         return {"success": False, "error": str(e)}
@@ -552,76 +600,3 @@ async def update_port_forward(
     except Exception as e:
         logger.error(f"Error updating port forward {port_forward_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_create_simple_port_forward",
-    description="Criação simplificada de regra de port forwarding UniFi Network — novo redirecionamento de porta via schema compacto com preview automático e confirmação obrigatória. Use quando precisar criar port forward rapidamente, configurar NAT básico ou expor serviço simples. Cria regra de redirecionamento com schema simplificado no controlador UniFi.",
-    permission_category="port_forwards",
-    permission_action="create",
-)
-async def create_simple_port_forward(
-    rule: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
-) -> Dict[str, Any]:
-    """Create port forward with compact input.
-
-    Args:
-        rule: The compact rule described below.
-        confirm: Must be True to apply; otherwise a preview is returned.
-        site: Optional site name/slug. If None, uses current default site.
-
-    Schema (validated internally):
-    {
-        "name": "Home Web",
-        "ext_port": "8443",
-        "to_ip": "192.168.1.10",
-        "int_port": "443",          # optional (defaults to ext_port)
-        "protocol": "tcp",          # optional (default both)
-        "enabled": true              # optional (default true)
-    }
-    """
-
-    if not parse_permission(config.permissions, "port_forward", "create"):
-        return {"success": False, "error": "Permission denied."}
-
-    ok, err, validated = UniFiValidatorRegistry.validate("port_forward_simple", rule)
-    if not ok or validated is None:
-        return {"success": False, "error": err or "Validation failed"}
-
-    r = validated
-
-    # Build API payload matching existing V1 schema keys
-    payload: Dict[str, Any] = {
-        "name": r["name"],
-        "dst_port": str(r["ext_port"]),
-        "fwd_port": str(r.get("int_port", r["ext_port"])),
-        "fwd_ip": r["to_ip"],
-        "protocol": {
-            "tcp": "tcp",
-            "udp": "udp",
-            "both": "tcp_udp",
-        }.get(r.get("protocol", "both"), "tcp_udp"),
-        "enabled": r.get("enabled", True),
-    }
-
-    if not confirm and not should_auto_confirm():
-        return {
-            "success": True,
-            "preview": payload,
-            "message": "Set confirm=true to apply.",
-        }
-
-    _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
-
-    created = await firewall_manager.create_port_forward(payload, site=site_slug)
-    if created is None or not isinstance(created, dict):
-        return {
-            "success": False,
-            "error": "Controller rejected port forward creation. See logs.",
-        }
-
-    return {
-        "success": True,
-        "port_forward_id": created.get("_id"),
-        "details": json.loads(json.dumps(created, default=str)),
-    }

@@ -14,49 +14,65 @@ from src.exceptions import (
     SiteForbiddenError,
     SiteNotFoundError,
 )
-from src.runtime import device_manager, server, system_manager
+from src.managers.radio_projection import radio_view, ssid_view
+from src.runtime import config, device_manager, server, system_manager
 from src.utils.confirmation import action_preview, should_auto_confirm
+from src.utils.permissions import parse_permission
 from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
-# Radio band codes as the controller reports them in `radio_table` / `radio_table_stats`.
-RADIO_BAND_LABELS = {
-    "ng": "2.4GHz",
-    "na": "5GHz",
-    "6e": "6GHz",
-    "ax": "6GHz",
+DEVICE_ACTIONS = frozenset({"reboot", "adopt", "rename", "locate", "upgrade", "set_radio"})
+
+# Folding several operations behind one tool must not quietly widen what the
+# permission file allows. The decorator gates registration on devices/update;
+# an action that is really a create still has to clear devices/create.
+DEVICE_ACTION_PERMISSION = {
+    "adopt": ("devices", "create"),
+}
+DEFAULT_DEVICE_PERMISSION = ("devices", "update")
+
+# What the operator is agreeing to when they confirm. Stated per action because
+# "are you sure" without a consequence is not a decision.
+DEVICE_ACTION_CONSEQUENCES = {
+    "reboot": [
+        "The device drops off the network while it restarts.",
+        "Clients connected through it lose connectivity until it is back.",
+    ],
+    "adopt": ["The device is provisioned into this site and takes its configuration."],
+    "upgrade": [
+        "The device downloads and installs firmware, then restarts.",
+        "It is unreachable for several minutes and must not lose power.",
+    ],
+    "set_radio": [
+        "The access point re-provisions its radio, briefly dropping wireless clients.",
+        "Clients on the affected band reconnect on the new channel.",
+    ],
+    "rename": ["Only the label changes; the device keeps running."],
+    "locate": ["Only the locate LED changes; the device keeps running."],
 }
 
-
 def get_wifi_bands(device_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Describe the radios an access point is currently running.
+    """Describe the radios an access point is running, configuration and live.
 
-    Reads `radio_table_stats` when present because it carries the live channel,
-    client count and utilisation; falls back to the static `radio_table` when
-    the device has not reported statistics yet. Returns an empty list for a
-    device with no radios rather than raising, so a switch or gateway passed
-    here is simply reported as having none.
+    Delegates to the shared projection so this tool and `unifi_get_ap_stats`
+    describe the same radio the same way.
     """
-    radios = device_raw.get("radio_table_stats") or device_raw.get("radio_table") or []
-    bands: List[Dict[str, Any]] = []
-    for radio in radios:
-        if not isinstance(radio, dict):
-            continue
-        code = radio.get("radio")
-        bands.append(
-            {
-                "band": RADIO_BAND_LABELS.get(code, code or "unknown"),
-                "radio_code": code,
-                "interface": radio.get("name"),
-                "channel": radio.get("channel"),
-                "channel_width_mhz": radio.get("ht"),
-                "tx_power_dbm": radio.get("tx_power"),
-                "clients": radio.get("num_sta"),
-                "channel_utilization_percent": radio.get("cu_total"),
-            }
-        )
-    return bands
+    live_by_name = {
+        radio.get("name"): radio
+        for radio in (device_raw.get("radio_table_stats") or [])
+        if isinstance(radio, dict)
+    }
+    return [
+        radio_view(config, live_by_name.get(config.get("name"), {}))
+        for config in (device_raw.get("radio_table") or [])
+        if isinstance(config, dict)
+    ]
+
+
+def get_broadcast_ssids(device_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The SSIDs this access point is broadcasting, per radio."""
+    return [ssid_view(v) for v in (device_raw.get("vap_table") or []) if isinstance(v, dict)]
 
 
 @server.tool(
@@ -226,6 +242,7 @@ async def get_device_details(mac_address: str, site: Optional[str] = None) -> Di
         if device_raw.get("type", "").startswith("uap"):  # Access Points
             device_info["wifi_clients"] = device_raw.get("num_sta", 0)
             device_info["wifi_bands"] = get_wifi_bands(device_raw)
+            device_info["broadcast_ssids"] = get_broadcast_ssids(device_raw)
         elif device_raw.get("type", "").startswith(("usw", "usk")):  # Switches
             device_info["ports_total"] = len(device_raw.get("port_table", []))
             device_info["ports_up"] = len([p for p in device_raw.get("port_table", []) if p.get("up", False)])
@@ -258,172 +275,136 @@ async def get_device_details(mac_address: str, site: Optional[str] = None) -> Di
 
 
 @server.tool(
-    name="unifi_reboot_device",
-    description="Reinicialização de dispositivo UniFi Network via endereço MAC — reboot remoto de equipamento, access point, switch ou gateway com confirmação de segurança. Use quando precisar reiniciar hardware com problemas ou aplicar configurações. Executa restart controlado do dispositivo no controlador UniFi com validação multi-site.",
+    name="unifi_manage_device",
+    description="Ações de gerenciamento sobre um equipamento UniFi Network — reiniciar, adotar, renomear, piscar o LED de localização, atualizar firmware e configurar o rádio de um access point com canal, largura de canal e potência de transmissão manuais. Use quando precisar agir sobre um dispositivo específico em vez de apenas consultá-lo. Cada ação exige o endereço MAC do equipamento e a ação desejada; reiniciar, adotar e atualizar firmware exigem confirm=true explícito por serem imediatas e irreversíveis no controlador UniFi.",
     permission_category="devices",
     permission_action="update",
 )
-async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for rebooting a device with multi-site support.
+async def manage_device(
+    mac_address: str,
+    action: str,
+    name: Optional[str] = None,
+    band: Optional[str] = None,
+    channel: Optional[Any] = None,
+    channel_width: Optional[int] = None,
+    tx_power_mode: Optional[str] = None,
+    tx_power_dbm: Optional[int] = None,
+    enable: bool = True,
+    confirm: bool = False,
+    site: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Act on one device.
 
     Args:
-        mac_address: MAC address of the device to reboot
-        confirm: If True, skip confirmation prompt (requires admin privileges)
-        site: Optional site name/slug. If None, uses current default site
+        mac_address: MAC, controller `_id` or name of the device.
+        action: One of `reboot`, `adopt`, `rename`, `locate`, `upgrade`,
+            `set_radio`.
+        name: New device name. Required for `rename`.
+        band: Radio to configure: "2.4GHz", "5GHz" or "6GHz". Required for
+            `set_radio`.
+        channel: Channel number, or "auto" to return the choice to the
+            controller. Validated against what the site's regulatory domain
+            permits at the chosen width.
+        channel_width: 20, 40, 80, 160 or 320 MHz.
+        tx_power_mode: auto, low, medium, high, or custom.
+        tx_power_dbm: Transmit power, only with `tx_power_mode="custom"`, and
+            bounded by what the radio reports it supports.
+        enable: For `locate`, whether to start (True) or stop (False) flashing.
+        confirm: Required for `reboot`, `adopt` and `upgrade`. Those take effect
+            at once and no later call undoes them, so they are never
+            auto-confirmed.
+        site: Site slug or display name.
 
     Returns:
-        Dict with reboot result and metadata including site information
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
+        Dict with the outcome and site metadata, or a preview when an action
+        that requires confirmation is called without it.
     """
+    action_normalised = (action or "").strip().lower()
+    if action_normalised not in DEVICE_ACTIONS:
+        return {
+            "success": False,
+            "error": f"Unknown action '{action}'. Use one of: {', '.join(sorted(DEVICE_ACTIONS))}.",
+        }
+
+    category, permission = DEVICE_ACTION_PERMISSION.get(action_normalised, DEFAULT_DEVICE_PERMISSION)
+    if not parse_permission(config.permissions, category, permission):
+        return {
+            "success": False,
+            "error": f"Permission denied: '{action_normalised}' requires {category}.{permission}.",
+        }
+
     try:
-        # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Get device details first to verify it exists
         device_obj = await device_manager.get_device_details(mac_address, site=site_slug)
-        if not device_obj:
+        device_label = mac_address
+        if device_obj:
+            device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
+            device_label = f"'{device_raw.get('name') or device_raw.get('model')}' ({mac_address})"
+        elif action_normalised != "adopt":
+            # A device awaiting adoption is not in the adopted list, so only that
+            # action may legitimately name a device this lookup cannot find.
             return inject_site_metadata(
-                {
-                    "success": False,
-                    "error": f"Device not found with MAC address: {mac_address}",
-                },
+                {"success": False, "error": f"No device matched '{mac_address}' on this site."},
                 site_id,
                 site_name,
                 site_slug,
             )
 
-        device_raw = device_obj.raw if hasattr(device_obj, "raw") else device_obj
-        device_name = device_raw.get("name", "Unknown Device")
-
-        # Create preview for confirmation
-        if not confirm and not should_auto_confirm("reboot"):
-            # The preview is the response, not a field inside another envelope that
-            # repeats its own success and confirmation flags.
+        if not confirm and not should_auto_confirm(action_normalised):
             return inject_site_metadata(
                 action_preview(
-                    action="reboot",
-                    target=f"device '{device_name}' ({mac_address})",
+                    action=action_normalised,
+                    target=f"device {device_label}",
                     site=site_name or site_slug,
-                    consequences=[
-                    "The device drops off the network while it restarts.",
-                    "Clients connected through it lose connectivity until it is back.",
-                    ],
+                    consequences=DEVICE_ACTION_CONSEQUENCES.get(action_normalised),
                 ),
                 site_id,
                 site_name,
                 site_slug,
             )
 
-        # Execute reboot
-        success = await device_manager.reboot_device(mac_address, site=site_slug)
-
-        result = {
-            "success": success,
-            "device_name": device_name,
-            "mac_address": mac_address,
-            "action": "reboot",
-        }
-
-        if success:
-            result["message"] = f"Device '{device_name}' reboot initiated successfully"
-        else:
-            result["error"] = f"Failed to reboot device '{device_name}'"
-
-        return inject_site_metadata(result, site_id, site_name, site_slug)
-
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
-        raise
-    except Exception as e:
-        logger.error(f"Error rebooting device: {e}", exc_info=True)
-        return inject_site_metadata(
-            {
-                "success": False,
-                "error": str(e),
-            },
-            site_id if "site_id" in locals() else None,
-            site_name if "site_name" in locals() else None,
-            site_slug if "site_slug" in locals() else None,
-        )
-
-
-@server.tool(
-    name="unifi_adopt_device",
-    description="Adoção de equipamento UniFi Network pendente via endereço MAC — integração de dispositivo, access point, switch ou gateway novo ao controlador com confirmação de segurança. Use quando precisar adicionar hardware detectado, incorporar aparelho à infraestrutura ou gerenciar equipamentos não adotados. Executa adoption no controlador UniFi com validação multi-site.",
-    permission_category="devices",
-    permission_action="create",
-)
-async def adopt_device(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Implementation for adopting a device with multi-site support.
-
-    Args:
-        mac_address: MAC address of the device to adopt
-        confirm: If True, skip confirmation prompt (requires admin privileges)
-        site: Optional site name/slug. If None, uses current default site
-
-    Returns:
-        Dict with adoption result and metadata including site information
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    try:
-        # Resolve site context and get metadata
-        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-
-        # Create preview for confirmation
-        if not confirm and not should_auto_confirm("adopt"):
-            # The preview is the response, not a field inside another envelope that
-            # repeats its own success and confirmation flags.
-            return inject_site_metadata(
-                action_preview(
-                    action="adopt",
-                    target=f"device with MAC {mac_address}",
-                    site=site_name or site_slug,
-                    consequences=[
-                        "The device is provisioned into this site and takes its configuration.",
-                    ],
-                ),
-                site_id,
-                site_name,
-                site_slug,
+        if action_normalised == "rename":
+            if not name:
+                return {"success": False, "error": "rename requires the 'name' parameter."}
+            succeeded = await device_manager.rename_device(mac_address, name, site=site_slug)
+            result: Dict[str, Any] = {"success": succeeded, "action": "rename", "new_name": name}
+        elif action_normalised == "locate":
+            succeeded = await device_manager.locate_device(mac_address, enable=enable, site=site_slug)
+            result = {"success": succeeded, "action": "locate", "flashing": enable}
+        elif action_normalised == "set_radio":
+            if not band:
+                return {"success": False, "error": "set_radio requires the 'band' parameter (2.4GHz, 5GHz or 6GHz)."}
+            outcome = await device_manager.set_radio_config(
+                mac_address,
+                band=band,
+                channel=channel,
+                channel_width=channel_width,
+                tx_power_mode=tx_power_mode,
+                tx_power_dbm=tx_power_dbm,
+                site=site_slug,
             )
-
-        # Execute adoption
-        success = await device_manager.adopt_device(mac_address, site=site_slug)
-
-        result = {
-            "success": success,
-            "mac_address": mac_address,
-            "action": "adopt",
-        }
-
-        if success:
-            result["message"] = f"Device with MAC {mac_address} adopted successfully"
+            result = {"success": True, "action": "set_radio", "band": band, **outcome}
         else:
-            result["error"] = f"Failed to adopt device with MAC {mac_address}"
+            runner = {
+                "reboot": device_manager.reboot_device,
+                "adopt": device_manager.adopt_device,
+                "upgrade": device_manager.upgrade_device,
+            }[action_normalised]
+            succeeded = await runner(mac_address, site=site_slug)
+            result = {"success": succeeded, "action": action_normalised}
 
+        result.setdefault("device", device_label)
+        if not result.get("success") and "error" not in result:
+            result["error"] = f"The controller did not accept {action_normalised} for device {device_label}."
         return inject_site_metadata(result, site_id, site_name, site_slug)
 
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
-        logger.warning(f"Site parameter validation error: {e.message}")
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
         raise
+    except ValueError as e:
+        # Raised for an input the radio or the regulatory domain rejects; the
+        # message already names the permitted values.
+        return {"success": False, "error": str(e)}
     except Exception as e:
-        logger.error(f"Error adopting device: {e}", exc_info=True)
-        return inject_site_metadata(
-            {
-                "success": False,
-                "error": str(e),
-            },
-            site_id if "site_id" in locals() else None,
-            site_name if "site_name" in locals() else None,
-            site_slug if "site_slug" in locals() else None,
-        )
+        logger.error(f"Error running '{action_normalised}' on device {mac_address}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}

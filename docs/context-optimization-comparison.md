@@ -17,7 +17,7 @@
 ┌─────────────────────────────────────────────────────────────┐
 │ MCP Server: list_tools()                                    │
 │                                                              │
-│ Returns 67 tools:                                            │
+│ Returns the whole catalog:                                   │
 │ ├─ unifi_tool_index                                          │
 │ ├─ unifi_execute                                             │
 │ ├─ unifi_batch / unifi_batch_status                          │
@@ -25,9 +25,9 @@
 │ ├─ unifi_get_client_details                                  │
 │ ├─ unifi_list_devices                                        │
 │ ├─ unifi_get_device_details                                  │
-│ ├─ unifi_reboot_device                                       │
+│ ├─ unifi_manage_device                                       │
 │ ├─ unifi_list_networks                                       │
-│ └─ ... 58 more tools                                         │
+│ └─ ... and the rest                                          │
 │                                                              │
 │ 📊 Context: ~5,000 tokens                                    │
 └─────────────────────────────────────────────────────────────┘
@@ -39,7 +39,7 @@
 │ ┌───────────────────────────────────────────┐               │
 │ │ System Prompt              │ ~1,000 tokens │               │
 │ ├───────────────────────────────────────────┤               │
-│ │ Tool Schemas (67 tools)    │ ~5,000 tokens │ ◄── HEAVY!   │
+│ │ Tool Schemas (all tools)   │ ~5,000 tokens │ ◄── HEAVY!   │
 │ ├───────────────────────────────────────────┤               │
 │ │ Conversation History       │ ~2,000 tokens │               │
 │ ├───────────────────────────────────────────┤               │
@@ -97,7 +97,7 @@
 │ ┌───────────────────────────────────────────┐               │
 │ │ System Prompt              │ ~1,000 tokens │               │
 │ ├───────────────────────────────────────────┤               │
-│ │ Tool Schemas (3 tools)     │   ~200 tokens │ ◄── LIGHT!   │
+│ │ Tool Schemas (4 tools)     │   ~200 tokens │ ◄── LIGHT!   │
 │ ├───────────────────────────────────────────┤               │
 │ │ Conversation History       │ ~2,000 tokens │               │
 │ ├───────────────────────────────────────────┤               │
@@ -125,7 +125,7 @@
 │   "tools": [                                                 │
 │     {"name": "unifi_list_clients", "description": "...", ... },│
 │     {"name": "unifi_get_client_details", ...},              │
-│     ... 64 more tools                                        │
+│     ... and the rest of the catalog                          │
 │   ]                                                          │
 │ }                                                            │
 │                                                              │
@@ -246,7 +246,7 @@
 The key insight is that **most conversations only use a small subset of tools**, but traditional MCP servers load ALL tools into context "just in case."
 
 With `meta_only` mode:
-1. Start lean (3 tools)
+1. Start lean (4 meta-tools)
 2. Discover on-demand (call tool_index when needed)
 3. Use once (tool schema stays in conversation history)
 4. Reuse naturally (if same tool needed again)

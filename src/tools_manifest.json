@@ -1,20 +1,17 @@
 {
-  "count": 90,
+  "count": 87,
   "generated_by": "scripts/generate_tool_manifest.py",
   "module_map": {
-    "list_sites": "src.tools.system",
-    "unifi_adopt_device": "src.tools.devices",
     "unifi_archive_alarm": "src.tools.events",
     "unifi_archive_all_alarms": "src.tools.events",
     "unifi_authorize_guest": "src.tools.clients",
+    "unifi_batch": "src.utils.meta_tools",
+    "unifi_batch_status": "src.utils.meta_tools",
     "unifi_block_client": "src.tools.clients",
     "unifi_create_firewall_policy": "src.tools.firewall",
     "unifi_create_network": "src.tools.network",
     "unifi_create_port_forward": "src.tools.port_forwards",
     "unifi_create_qos_rule": "src.tools.qos",
-    "unifi_create_simple_firewall_policy": "src.tools.firewall",
-    "unifi_create_simple_port_forward": "src.tools.port_forwards",
-    "unifi_create_simple_qos_rule": "src.tools.qos",
     "unifi_create_static_route": "src.tools.routing",
     "unifi_create_traffic_route": "src.tools.traffic_routes",
     "unifi_create_user_group": "src.tools.usergroups",
@@ -25,10 +22,7 @@
     "unifi_delete_traffic_route": "src.tools.traffic_routes",
     "unifi_delete_user_group": "src.tools.usergroups",
     "unifi_delete_vpn_config": "src.tools.vpn",
-    "unifi_disable_static_route": "src.tools.routing",
-    "unifi_disable_vpn_config": "src.tools.vpn",
-    "unifi_enable_static_route": "src.tools.routing",
-    "unifi_enable_vpn_config": "src.tools.vpn",
+    "unifi_execute": "src.utils.meta_tools",
     "unifi_force_reconnect_client": "src.tools.clients",
     "unifi_get_ap_stats": "src.tools.stats",
     "unifi_get_client_details": "src.tools.clients",
@@ -65,14 +59,16 @@
     "unifi_list_networks": "src.tools.network",
     "unifi_list_port_forwards": "src.tools.port_forwards",
     "unifi_list_qos_rules": "src.tools.qos",
+    "unifi_list_sites": "src.tools.system",
     "unifi_list_static_routes": "src.tools.routing",
     "unifi_list_traffic_routes": "src.tools.traffic_routes",
     "unifi_list_user_groups": "src.tools.usergroups",
     "unifi_list_vouchers": "src.tools.hotspot",
     "unifi_list_vpn_configs": "src.tools.vpn",
     "unifi_list_wlans": "src.tools.network",
+    "unifi_load_tools": "src.utils.meta_tools",
     "unifi_lookup_by_ip": "src.tools.clients",
-    "unifi_reboot_device": "src.tools.devices",
+    "unifi_manage_device": "src.tools.devices",
     "unifi_rename_client": "src.tools.clients",
     "unifi_restart_controller": "src.tools.system",
     "unifi_revoke_voucher": "src.tools.hotspot",
@@ -80,6 +76,7 @@
     "unifi_toggle_firewall_policy": "src.tools.firewall",
     "unifi_toggle_port_forward": "src.tools.port_forwards",
     "unifi_toggle_qos_rule_enabled": "src.tools.qos",
+    "unifi_tool_index": "src.utils.meta_tools",
     "unifi_unauthorize_guest": "src.tools.clients",
     "unifi_unblock_client": "src.tools.clients",
     "unifi_update_firewall_policy": "src.tools.firewall",
@@ -95,39 +92,6 @@
   },
   "note": "Auto-generated with full schemas from tool decorators. Do not edit manually.",
   "tools": [
-    {
-      "description": "Sites dispon\u00edveis no controlador UniFi Network \u2014 identificadores, nomes e descri\u00e7\u00f5es de todos os sites que a whitelist permite operar. Use quando precisar listar sites, auditar ambientes ou descobrir o identificador correto para o par\u00e2metro site das demais tools. Retorna o _id real do site, o slug usado nos caminhos da API e o nome leg\u00edvel no controlador UniFi.",
-      "name": "list_sites",
-      "schema": {
-        "input": {
-          "properties": {},
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Ado\u00e7\u00e3o de equipamento UniFi Network pendente via endere\u00e7o MAC \u2014 integra\u00e7\u00e3o de dispositivo, access point, switch ou gateway novo ao controlador com confirma\u00e7\u00e3o de seguran\u00e7a. Use quando precisar adicionar hardware detectado, incorporar aparelho \u00e0 infraestrutura ou gerenciar equipamentos n\u00e3o adotados. Executa adoption no controlador UniFi com valida\u00e7\u00e3o multi-site.",
-      "name": "unifi_adopt_device",
-      "schema": {
-        "input": {
-          "properties": {
-            "confirm": {
-              "type": "boolean"
-            },
-            "mac_address": {
-              "type": "string"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "mac_address"
-          ],
-          "type": "object"
-        }
-      }
-    },
     {
       "description": "Arquivamento de alarme espec\u00edfico do UniFi Network via ID \u2014 marca a notifica\u00e7\u00e3o como resolvida e a retira do painel de alarmes ativos, com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar baixar um aviso j\u00e1 tratado ou limpar alarme resolvido. Executa o comando de arquivamento no controlador UniFi e confirma que o pr\u00f3prio controlador aceitou a opera\u00e7\u00e3o.",
       "name": "unifi_archive_alarm",
@@ -204,6 +168,108 @@
       }
     },
     {
+      "description": "Execute multiple tools in parallel with multi-site support. Returns job IDs for status checking.",
+      "name": "unifi_batch",
+      "schema": {
+        "input": {
+          "properties": {
+            "operations": {
+              "description": "Array of {tool, arguments, site?} objects",
+              "items": {
+                "properties": {
+                  "arguments": {
+                    "description": "Tool parameters",
+                    "type": "object"
+                  },
+                  "site": {
+                    "description": "Optional per-operation site (overrides global site)",
+                    "type": "string"
+                  },
+                  "tool": {
+                    "description": "Tool name from unifi_tool_index",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "tool"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "site": {
+              "description": "Optional global site parameter (applies to all operations unless overridden)",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operations"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "properties": {
+            "errors": {
+              "description": "Any errors",
+              "type": "array"
+            },
+            "jobs": {
+              "description": "Started jobs with IDs",
+              "type": "array"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    {
+      "description": "Check status of batch operations. Returns status, result (if done), or error.",
+      "name": "unifi_batch_status",
+      "schema": {
+        "input": {
+          "properties": {
+            "jobId": {
+              "description": "Single job ID to check",
+              "type": "string"
+            },
+            "jobIds": {
+              "description": "Multiple job IDs to check",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "type": "object"
+        },
+        "output": {
+          "properties": {
+            "error": {
+              "description": "Error message (if failed)",
+              "type": "string"
+            },
+            "jobs": {
+              "description": "Status of multiple jobs",
+              "type": "array"
+            },
+            "result": {
+              "description": "Result (if done)"
+            },
+            "status": {
+              "enum": [
+                "running",
+                "done",
+                "error",
+                "unknown"
+              ],
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    {
       "description": "Bloqueio de cliente ou dispositivo na rede UniFi Network \u2014 nega acesso \u00e0 rede para equipamentos, aparelhos e esta\u00e7\u00f5es espec\u00edficas identificadas por MAC address no controlador. Use quando precisar bloquear dispositivo indesejado, banir equipamento n\u00e3o autorizado ou restringir acesso de cliente espec\u00edfico \u00e0 rede UniFi. Requer confirma\u00e7\u00e3o antes de aplicar o bloqueio permanente.",
       "name": "unifi_block_client",
       "schema": {
@@ -227,7 +293,7 @@
       }
     },
     {
-      "description": "Cria\u00e7\u00e3o de pol\u00edtica de firewall UniFi Network com valida\u00e7\u00e3o de schema \u2014 nova regra, filtro ou controle de seguran\u00e7a com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar adicionar prote\u00e7\u00e3o personalizada, implementar bloqueio espec\u00edfico ou configurar permiss\u00e3o de tr\u00e1fego. Executa valida\u00e7\u00e3o e cria pol\u00edtica no controlador UniFi com suporte multi-site.",
+      "description": "Pol\u00edticas e regras de firewall no UniFi Network \u2014 cria\u00e7\u00e3o por forma compacta (seletores src/dst de zona, rede, MAC ou grupo de IPs) ou por payload completo da API V2, detectada automaticamente pelo formato enviado. Use quando precisar bloquear, liberar ou filtrar tr\u00e1fego entre zonas e redes. Retorna preview com confirm=false e a pol\u00edtica criada no UniFi com confirm=true.",
       "name": "unifi_create_firewall_policy",
       "schema": {
         "input": {
@@ -273,11 +339,14 @@
       }
     },
     {
-      "description": "Cria\u00e7\u00e3o de regra de port forwarding UniFi Network com valida\u00e7\u00e3o \u2014 novo redirecionamento de porta, mapeamento NAT ou exposi\u00e7\u00e3o de servi\u00e7o com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar adicionar port forward, configurar NAT ou expor servi\u00e7o interno. Cria regra de redirecionamento validada no controlador UniFi com suporte multi-site.",
+      "description": "Port forwarding e NAT no UniFi Network \u2014 cria\u00e7\u00e3o de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd_ip), detectada automaticamente pelo formato enviado. Use quando precisar expor servi\u00e7o interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
       "name": "unifi_create_port_forward",
       "schema": {
         "input": {
           "properties": {
+            "confirm": {
+              "type": "boolean"
+            },
             "port_forward_data": {
               "type": "object"
             },
@@ -293,7 +362,7 @@
       }
     },
     {
-      "description": "Cria\u00e7\u00e3o de regra de QoS UniFi Network com valida\u00e7\u00e3o \u2014 nova pol\u00edtica de qualidade de servi\u00e7o, prioriza\u00e7\u00e3o de tr\u00e1fego ou limite de banda com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar adicionar QoS rule, configurar prioriza\u00e7\u00e3o ou implementar bandwidth limit. Cria regra de QoS validada no controlador UniFi com suporte multi-site.",
+      "description": "Regras de QoS, prioriza\u00e7\u00e3o e limite de banda no UniFi Network \u2014 cria\u00e7\u00e3o por forma compacta (limit_kbps com alvo por IP ou sub-rede) ou por payload completo (bandwidth_limit_kbps), detectada automaticamente pelo formato enviado. Use quando precisar limitar velocidade, priorizar tr\u00e1fego ou reservar banda. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
       "name": "unifi_create_qos_rule",
       "schema": {
         "input": {
@@ -310,72 +379,6 @@
           },
           "required": [
             "qos_data"
-          ],
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Cria\u00e7\u00e3o simplificada de pol\u00edtica de firewall UniFi Network com schema de alto n\u00edvel \u2014 nova regra ou filtro usando seletores amig\u00e1veis src/dst e preview antes da confirma\u00e7\u00e3o. Use quando precisar adicionar prote\u00e7\u00e3o rapidamente ou configurar bloqueio simples. Retorna preview expandido ou cria pol\u00edtica no controlador UniFi com valida\u00e7\u00e3o autom\u00e1tica.",
-      "name": "unifi_create_simple_firewall_policy",
-      "schema": {
-        "input": {
-          "properties": {
-            "confirm": {
-              "type": "boolean"
-            },
-            "policy": {
-              "type": "object"
-            }
-          },
-          "required": [
-            "policy"
-          ],
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Cria\u00e7\u00e3o simplificada de regra de port forwarding UniFi Network \u2014 novo redirecionamento de porta via schema compacto com preview autom\u00e1tico e confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar criar port forward rapidamente, configurar NAT b\u00e1sico ou expor servi\u00e7o simples. Cria regra de redirecionamento com schema simplificado no controlador UniFi.",
-      "name": "unifi_create_simple_port_forward",
-      "schema": {
-        "input": {
-          "properties": {
-            "confirm": {
-              "type": "boolean"
-            },
-            "rule": {
-              "type": "object"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "rule"
-          ],
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Cria\u00e7\u00e3o simplificada de regra de QoS UniFi Network \u2014 nova pol\u00edtica de qualidade de servi\u00e7o via schema compacto com preview autom\u00e1tico e confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar criar QoS rule rapidamente, configurar prioriza\u00e7\u00e3o b\u00e1sica ou implementar limite simples. Cria regra de QoS com schema simplificado no controlador UniFi.",
-      "name": "unifi_create_simple_qos_rule",
-      "schema": {
-        "input": {
-          "properties": {
-            "confirm": {
-              "type": "boolean"
-            },
-            "rule": {
-              "type": "object"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "rule"
           ],
           "type": "object"
         }
@@ -627,81 +630,31 @@
       }
     },
     {
-      "description": "Desativa\u00e7\u00e3o de rota est\u00e1tica UniFi Network via ID \u2014 desabilita destino de rede, gateway ou configura\u00e7\u00e3o de roteamento temporariamente. Use quando precisar desativar rota espec\u00edfica ou interromper direcionamento de tr\u00e1fego. Executa disable de static route no controlador UniFi com suporte multi-site.",
-      "name": "unifi_disable_static_route",
+      "description": "Execute a tool discovered via unifi_tool_index. Supports optional site parameter for multi-site operations.",
+      "name": "unifi_execute",
       "schema": {
         "input": {
           "properties": {
-            "route_id": {
-              "type": "string"
+            "arguments": {
+              "description": "Tool parameters from schema",
+              "type": "object"
             },
             "site": {
+              "description": "Optional site name/slug for multi-site support. Accepts fuzzy matching (e.g., 'acme', 'Grupo Acme').",
+              "type": "string"
+            },
+            "tool": {
+              "description": "Tool name from unifi_tool_index",
               "type": "string"
             }
           },
           "required": [
-            "route_id"
+            "tool"
           ],
           "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Desabilita\u00e7\u00e3o de configura\u00e7\u00e3o VPN UniFi Network via ID \u2014 desativa\u00e7\u00e3o tempor\u00e1ria de t\u00fanel site-to-site, acesso remoto ou conectividade segura sem remo\u00e7\u00e3o permanente. Use quando precisar desativar VPN, pausar t\u00fanel ou suspender acesso remoto. Executa disable de VPN config no controlador UniFi com suporte multi-site.",
-      "name": "unifi_disable_vpn_config",
-      "schema": {
-        "input": {
-          "properties": {
-            "config_id": {
-              "type": "string"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "config_id"
-          ],
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Ativa\u00e7\u00e3o de rota est\u00e1tica UniFi Network via ID \u2014 habilita destino de rede, gateway ou configura\u00e7\u00e3o de roteamento temporariamente desabilitado. Use quando precisar ativar rota espec\u00edfica ou restaurar direcionamento de tr\u00e1fego. Executa enable de static route no controlador UniFi com suporte multi-site.",
-      "name": "unifi_enable_static_route",
-      "schema": {
-        "input": {
-          "properties": {
-            "route_id": {
-              "type": "string"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "route_id"
-          ],
-          "type": "object"
-        }
-      }
-    },
-    {
-      "description": "Habilita\u00e7\u00e3o de configura\u00e7\u00e3o VPN UniFi Network via ID \u2014 ativa\u00e7\u00e3o de t\u00fanel site-to-site, acesso remoto ou conectividade segura previamente desabilitada. Use quando precisar ativar VPN, restaurar t\u00fanel ou habilitar acesso remoto. Executa enable de VPN config no controlador UniFi com suporte multi-site.",
-      "name": "unifi_enable_vpn_config",
-      "schema": {
-        "input": {
-          "properties": {
-            "config_id": {
-              "type": "string"
-            },
-            "site": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "config_id"
-          ],
+        },
+        "output": {
+          "description": "Tool result",
           "type": "object"
         }
       }
@@ -730,7 +683,7 @@
       }
     },
     {
-      "description": "Estat\u00edsticas dos access points do site UniFi Network \u2014 por AP, com CPU, mem\u00f3ria, uptime, clientes conectados, canal, utiliza\u00e7\u00e3o de canal e pot\u00eancia de transmiss\u00e3o por r\u00e1dio, mais s\u00e9rie hor\u00e1ria de tr\u00e1fego. Use quando precisar monitorar APs, analisar cobertura ou diagnosticar RF. Retorna uma linha por access point adotado no controlador UniFi.",
+      "description": "Estat\u00edsticas completas dos access points do site UniFi Network \u2014 por AP: CPU, mem\u00f3ria, uptime e tr\u00e1fego; por r\u00e1dio: canal em uso e canal configurado, largura em uso e configurada, pot\u00eancia e seus limites, ocupa\u00e7\u00e3o do ar separada entre o pr\u00f3prio AP e terceiros, retransmiss\u00f5es, satisfa\u00e7\u00e3o, streams espaciais e suporte a DFS e 160MHz; por SSID: BSSID, clientes, sinal m\u00e9dio e erros. Use quando precisar escolher canal, diagnosticar interfer\u00eancia, dimensionar cobertura ou justificar uma mudan\u00e7a de RF. Com include_channel_survey=true acrescenta, por banda, quantos vizinhos ocupam cada canal permitido e qual o mais forte no controlador UniFi.",
       "name": "unifi_get_ap_stats",
       "schema": {
         "input": {
@@ -738,8 +691,14 @@
             "duration_hours": {
               "type": "integer"
             },
+            "include_channel_survey": {
+              "type": "boolean"
+            },
             "site": {
               "type": "string"
+            },
+            "survey_min_signal_dbm": {
+              "type": "integer"
             }
           },
           "type": "object"
@@ -1354,6 +1313,16 @@
       }
     },
     {
+      "description": "Sites dispon\u00edveis no controlador UniFi Network \u2014 identificadores, nomes e descri\u00e7\u00f5es de todos os sites que a whitelist permite operar. Use quando precisar listar sites, auditar ambientes ou descobrir o identificador correto para o par\u00e2metro site das demais tools. Retorna o _id real do site, o slug usado nos caminhos da API e o nome leg\u00edvel no controlador UniFi.",
+      "name": "unifi_list_sites",
+      "schema": {
+        "input": {
+          "properties": {},
+          "type": "object"
+        }
+      }
+    },
+    {
       "description": "Rotas est\u00e1ticas do controlador UniFi Network \u2014 tabela de roteamento, destinos de rede e gateways configurados para direcionamento de tr\u00e1fego. Use quando precisar listar rotas customizadas, auditar roteamento ou verificar configura\u00e7\u00f5es de gateway. Retorna lista completa de static routes com destino, gateway e interface no controlador UniFi.",
       "name": "unifi_list_static_routes",
       "schema": {
@@ -1438,6 +1407,43 @@
       }
     },
     {
+      "description": "Load tools for direct MCP access (advanced). Most users should use unifi_execute.",
+      "name": "unifi_load_tools",
+      "schema": {
+        "input": {
+          "properties": {
+            "tools": {
+              "description": "Tool names to load",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "tools"
+          ],
+          "type": "object"
+        },
+        "output": {
+          "properties": {
+            "errors": {
+              "description": "Any errors",
+              "type": "array"
+            },
+            "loaded": {
+              "description": "Successfully loaded tools",
+              "type": "array"
+            },
+            "message": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    {
       "description": "Clientes e dispositivos conectados no UniFi Network \u2014 busca reversa por endere\u00e7o IP, identifica\u00e7\u00e3o de equipamentos, hostname e MAC address. Use quando precisar localizar rapidamente um dispositivo, cliente ou aparelho pela rede sem consumir tokens excessivos. Retorna apenas campos essenciais (hostname, nome, MAC) otimizados para consultas \u00e1geis no controlador UniFi.",
       "name": "unifi_lookup_by_ip",
       "schema": {
@@ -1458,23 +1464,48 @@
       }
     },
     {
-      "description": "Reinicializa\u00e7\u00e3o de dispositivo UniFi Network via endere\u00e7o MAC \u2014 reboot remoto de equipamento, access point, switch ou gateway com confirma\u00e7\u00e3o de seguran\u00e7a. Use quando precisar reiniciar hardware com problemas ou aplicar configura\u00e7\u00f5es. Executa restart controlado do dispositivo no controlador UniFi com valida\u00e7\u00e3o multi-site.",
-      "name": "unifi_reboot_device",
+      "description": "A\u00e7\u00f5es de gerenciamento sobre um equipamento UniFi Network \u2014 reiniciar, adotar, renomear, piscar o LED de localiza\u00e7\u00e3o, atualizar firmware e configurar o r\u00e1dio de um access point com canal, largura de canal e pot\u00eancia de transmiss\u00e3o manuais. Use quando precisar agir sobre um dispositivo espec\u00edfico em vez de apenas consult\u00e1-lo. Cada a\u00e7\u00e3o exige o endere\u00e7o MAC do equipamento e a a\u00e7\u00e3o desejada; reiniciar, adotar e atualizar firmware exigem confirm=true expl\u00edcito por serem imediatas e irrevers\u00edveis no controlador UniFi.",
+      "name": "unifi_manage_device",
       "schema": {
         "input": {
           "properties": {
+            "action": {
+              "type": "string"
+            },
+            "band": {
+              "type": "string"
+            },
+            "channel": {
+              "type": "string"
+            },
+            "channel_width": {
+              "type": "string"
+            },
             "confirm": {
+              "type": "boolean"
+            },
+            "enable": {
               "type": "boolean"
             },
             "mac_address": {
               "type": "string"
             },
+            "name": {
+              "type": "string"
+            },
             "site": {
+              "type": "string"
+            },
+            "tx_power_dbm": {
+              "type": "string"
+            },
+            "tx_power_mode": {
               "type": "string"
             }
           },
           "required": [
-            "mac_address"
+            "mac_address",
+            "action"
           ],
           "type": "object"
         }
@@ -1647,6 +1678,28 @@
           "required": [
             "rule_id"
           ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "description": "CALL FIRST - List the UniFi tools registered on this server with their schemas; the response reports the exact count.",
+      "name": "unifi_tool_index",
+      "schema": {
+        "input": {
+          "properties": {},
+          "type": "object"
+        },
+        "output": {
+          "properties": {
+            "count": {
+              "type": "integer"
+            },
+            "tools": {
+              "description": "Available tools with schemas",
+              "type": "array"
+            }
+          },
           "type": "object"
         }
       }
@@ -1832,7 +1885,7 @@
       }
     },
     {
-      "description": "Atualiza\u00e7\u00e3o de rota est\u00e1tica UniFi Network via ID \u2014 modifica\u00e7\u00e3o de campos de destino, gateway ou par\u00e2metros de roteamento com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar ajustar rota ou modificar next-hop. Executa update parcial de static route no controlador UniFi com suporte multi-site.",
+      "description": "Rotas est\u00e1ticas do UniFi Network \u2014 altera destino, gateway (next-hop), dist\u00e2ncia e nome de uma rota por ID, e tamb\u00e9m ativa ou desativa a rota pelo campo enabled em update_data, sem exclu\u00ed-la. Use quando precisar ajustar, habilitar ou desabilitar uma rota de roteamento. Exige confirma\u00e7\u00e3o e retorna os campos alterados lidos do controlador UniFi, com suporte multi-site.",
       "name": "unifi_update_static_route",
       "schema": {
         "input": {
@@ -1913,7 +1966,7 @@
       }
     },
     {
-      "description": "Atualiza\u00e7\u00e3o de configura\u00e7\u00e3o VPN UniFi Network via ID \u2014 modifica\u00e7\u00e3o de t\u00fanel, endpoints ou par\u00e2metros de conectividade com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar ajustar VPN ou modificar t\u00fanel. Executa update parcial de VPN config no controlador UniFi com suporte multi-site.",
+      "description": "Configura\u00e7\u00f5es VPN do UniFi Network \u2014 altera t\u00fanel site-to-site, acesso remoto, endpoints e par\u00e2metros de uma VPN por ID, e tamb\u00e9m liga ou desliga o t\u00fanel pelo par\u00e2metro enabled, sem remov\u00ea-lo. Use quando precisar ajustar, habilitar ou desabilitar uma VPN. Exige confirma\u00e7\u00e3o e retorna os campos alterados lidos do controlador UniFi, com suporte multi-site.",
       "name": "unifi_update_vpn_config",
       "schema": {
         "input": {
@@ -1924,16 +1977,18 @@
             "confirm": {
               "type": "boolean"
             },
+            "enabled": {
+              "type": "string"
+            },
             "site": {
               "type": "string"
             },
             "update_data": {
-              "type": "object"
+              "type": "string"
             }
           },
           "required": [
-            "config_id",
-            "update_data"
+            "config_id"
           ],
           "type": "object"
         }

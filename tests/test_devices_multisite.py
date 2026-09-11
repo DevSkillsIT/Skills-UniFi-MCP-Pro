@@ -7,8 +7,7 @@ Fase 2A: Refatoração de Tools de Gerenciamento de Dispositivos (devices.py)
 Tools being tested:
 1. unifi_list_devices
 2. unifi_get_device_details
-3. unifi_adopt_device
-4. unifi_reboot_device
+3. unifi_manage_device
 """
 
 import pytest
@@ -62,22 +61,45 @@ def create_mock_device(
 class TestListDevicesWithSite:
     """Test list_devices with site parameter."""
 
-    @pytest.mark.asyncio
-    async def test_list_devices_backward_compatibility_without_site(self):
-        """GREEN: Should list devices without site parameter (default site mode)."""
-        # This is a behavioral test that validates backward compatibility
-        # The actual implementation will be updated in GREEN phase
-        assert True  # Placeholder for backward compatibility test
+    @staticmethod
+    def _tool_parameters(module: str, function: str) -> dict:
+        """Read a tool's declared parameters from the source.
 
-    @pytest.mark.asyncio
-    async def test_list_devices_site_parameter_signature(self):
-        """RED: Tool should accept optional site parameter."""
-        # This test validates that the function signature supports site parameter
-        # Test will pass after GREEN phase adds site: Optional[str] = None
+        `inspect.signature` cannot be used here: the test suite stubs the MCP
+        package, so `@server.tool` returns a MagicMock and the decorated name is
+        no longer the function. The source is the same either way.
+        """
+        import ast
+        from pathlib import Path
 
-        # We'll check this by inspecting the tool decorator
-        # For now, this is a placeholder showing the expected change
-        pass
+        path = Path(__file__).resolve().parents[1] / "src" / "tools" / f"{module}.py"
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function:
+                args = node.args
+                positional = args.posonlyargs + args.args
+                defaults = dict(zip([a.arg for a in positional[len(positional) - len(args.defaults):]], args.defaults))
+                return {a.arg: defaults.get(a.arg) for a in positional}
+        raise AssertionError(f"{function} not found in src/tools/{module}.py")
+
+    def test_list_devices_site_parameter_is_optional(self):
+        """Omitting `site` is valid and means the configured default site."""
+        import ast
+
+        parameters = self._tool_parameters("devices", "list_devices")
+        assert "site" in parameters
+        default = parameters["site"]
+        assert isinstance(default, ast.Constant) and default.value is None
+
+    def test_every_device_tool_accepts_a_site(self):
+        """A tool that cannot name its site can only ever act on the default one."""
+        import ast
+
+        for function in ("list_devices", "get_device_details", "manage_device"):
+            parameters = self._tool_parameters("devices", function)
+            assert "site" in parameters, f"{function} takes no site"
+            default = parameters["site"]
+            assert isinstance(default, ast.Constant) and default.value is None
 
 
 class TestGetDeviceDetailsWithSite:
@@ -90,24 +112,40 @@ class TestGetDeviceDetailsWithSite:
         assert True
 
 
-class TestAdoptDeviceWithSite:
-    """Test adopt_device with site parameter."""
+class TestManageDevice:
+    """Device mutations go through one tool that names the action."""
 
-    @pytest.mark.asyncio
-    async def test_adopt_device_backward_compatibility(self):
-        """GREEN: Should accept mac_address and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
+    def test_every_documented_action_is_accepted(self):
+        from src.tools.devices import DEVICE_ACTIONS
 
+        assert DEVICE_ACTIONS == {"reboot", "adopt", "rename", "locate", "upgrade", "set_radio"}
 
-class TestRebootDeviceWithSite:
-    """Test reboot_device with site parameter."""
+    def test_each_action_states_its_consequence(self):
+        """A confirmation prompt without a consequence is not a decision."""
+        from src.tools.devices import DEVICE_ACTIONS, DEVICE_ACTION_CONSEQUENCES
 
-    @pytest.mark.asyncio
-    async def test_reboot_device_backward_compatibility(self):
-        """GREEN: Should accept mac_address and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
+        assert set(DEVICE_ACTION_CONSEQUENCES) == DEVICE_ACTIONS
+        assert all(DEVICE_ACTION_CONSEQUENCES[a] for a in DEVICE_ACTIONS)
+
+    def test_adopt_still_requires_the_create_permission(self):
+        """Folding actions behind one tool must not widen what is permitted."""
+        from src.tools.devices import DEFAULT_DEVICE_PERMISSION, DEVICE_ACTION_PERMISSION
+
+        assert DEVICE_ACTION_PERMISSION["adopt"] == ("devices", "create")
+        assert DEFAULT_DEVICE_PERMISSION == ("devices", "update")
+
+    def test_irreversible_actions_are_never_auto_confirmed(self):
+        """UNIFI_AUTO_CONFIRM covers convenience, not consequences."""
+        from src.utils.confirmation import ALWAYS_CONFIRM_ACTIONS
+
+        for action in ("reboot", "adopt", "upgrade", "set_radio"):
+            assert action in ALWAYS_CONFIRM_ACTIONS
+
+    def test_reversible_actions_may_be_auto_confirmed(self):
+        from src.utils.confirmation import ALWAYS_CONFIRM_ACTIONS
+
+        for action in ("rename", "locate"):
+            assert action not in ALWAYS_CONFIRM_ACTIONS
 
 
 class TestSiteParameterIntegration:
@@ -204,21 +242,72 @@ class TestSiteWhitelistValidation:
 class TestCacheStrategyWithSite:
     """Test cache strategy for site-specific queries."""
 
+    @staticmethod
+    def _manager():
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.managers.device_manager import DeviceManager
+
+        connection = MagicMock()
+        connection.site = "default"
+        connection.resolve_slug = MagicMock(side_effect=lambda s: s or "default")
+        connection.ensure_connected = AsyncMock(return_value=True)
+        connection._cache = {}
+        connection.get_cached = MagicMock(side_effect=lambda key, timeout=None: connection._cache.get(key))
+        connection._update_cache = MagicMock(
+            side_effect=lambda key, value, timeout=None: connection._cache.__setitem__(key, value)
+        )
+        connection._invalidate_cache = MagicMock()
+        return DeviceManager(connection), connection
+
     @pytest.mark.asyncio
     async def test_cache_key_includes_site_slug(self):
-        """REFACTOR: Cache keys should include site slug for isolation."""
-        # This test validates the caching strategy
-        # When site="Acme", cache key should be like "devices_acme_*"
-        # When site="default", cache key should be like "devices_default_*"
+        """A cache key without the site serves one site's answer for another."""
+        manager, connection = self._manager()
+        connection.request = AsyncMock(return_value=[{"_id": "d1", "mac": "aa:aa:aa:aa:aa:aa"}])
 
-        # Placeholder for cache key validation
-        assert True  # Will be expanded in REFACTOR phase
+        await manager.get_devices(site="acme")
+        await manager.get_devices(site="bravo")
+
+        assert "devices_acme" in connection._cache
+        assert "devices_bravo" in connection._cache
 
     @pytest.mark.asyncio
     async def test_cross_site_cache_isolation(self):
-        """REFACTOR: Queries for different sites should not share cache."""
-        # This validates that querying site A doesn't return site B's cached data
-        assert True  # Will be expanded in REFACTOR phase
+        """Asking for site B must never return what site A cached."""
+        from unittest.mock import AsyncMock
+
+        manager, connection = self._manager()
+
+        connection.request = AsyncMock(return_value=[{"_id": "acme-1", "mac": "aa:aa:aa:aa:aa:aa"}])
+        acme = await manager.get_devices(site="acme")
+
+        connection.request = AsyncMock(return_value=[{"_id": "bravo-1", "mac": "bb:bb:bb:bb:bb:bb"}])
+        bravo = await manager.get_devices(site="bravo")
+
+        assert [d.raw["_id"] for d in acme] == ["acme-1"]
+        assert [d.raw["_id"] for d in bravo] == ["bravo-1"]
+
+        # And the second read must not have been served from the first one's entry.
+        again = await manager.get_devices(site="acme")
+        assert [d.raw["_id"] for d in again] == ["acme-1"]
+
+    @pytest.mark.asyncio
+    async def test_a_site_argument_never_outlives_its_call(self):
+        """The connection must point where it did before, whatever the call named.
+
+        The site is state shared by every caller. A helper that switched it and
+        failed to switch back sent the next, unrelated call to the wrong site.
+        """
+        from unittest.mock import AsyncMock
+
+        manager, connection = self._manager()
+        connection.request = AsyncMock(return_value=[])
+
+        await manager.get_devices(site="bravo")
+
+        assert connection.site == "default"
+        connection.set_site.assert_not_called()
 
 
 class TestDeviceToolsErrorHandling:

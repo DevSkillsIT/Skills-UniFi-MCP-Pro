@@ -50,6 +50,9 @@ python examples/python/use_async_jobs.py
 - Polling batch status with `unifi_batch_status`
 - Handling completion and errors
 
+`reboot`, `adopt` and `upgrade` require `confirm=True` in every call: they
+ignore `UNIFI_AUTO_CONFIRM` and are never auto-confirmed.
+
 **Use cases:**
 - Bulk operations across multiple devices
 - Parallel data collection
@@ -111,8 +114,8 @@ offline = [d for d in devices if not d.get("state") == 1]
 
 for device in offline:
     job_id = await client.start_async_job(
-        "unifi_reboot_device",
-        {"mac_address": device["mac"], "confirm": True}
+        "unifi_manage_device",
+        {"mac_address": device["mac"], "action": "reboot", "confirm": True}
     )
     print(f"Rebooting {device['name']}: {job_id}")
 ```

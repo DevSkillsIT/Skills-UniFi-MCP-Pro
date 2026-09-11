@@ -63,6 +63,37 @@ def generate_manifest() -> dict[str, Any]:
         # which in turn call register_tool() to populate TOOL_REGISTRY
         auto_load_tools()
 
+        # The meta-tools are registered by register_meta_tools(), not by a
+        # decorator under src/tools, so loading the tool modules alone leaves
+        # them out. A manifest without them under-reports the surface, and in
+        # lazy mode unifi_tool_index reads the manifest -- so the tools a client
+        # needs in order to reach every other tool would be the ones missing.
+        from src.jobs import get_job_status, start_async_tool
+        from src.runtime import server
+        from src.tool_index import register_tool, tool_index_handler
+        from src.utils.meta_tools import register_load_tools, register_meta_tools
+
+        original_decorator = getattr(server, "_original_tool", server.tool)
+        register_meta_tools(
+            server=server,
+            tool_decorator=original_decorator,
+            tool_index_handler=tool_index_handler,
+            start_async_tool=start_async_tool,
+            get_job_status=get_job_status,
+            register_tool=register_tool,
+        )
+        try:
+            from src.utils.lazy_tool_loader import setup_lazy_loading
+
+            register_load_tools(
+                server=server,
+                tool_decorator=original_decorator,
+                lazy_loader=setup_lazy_loading(server, original_decorator),
+                register_tool=register_tool,
+            )
+        except Exception as exc:
+            logger.warning("   unifi_load_tools not added to the manifest: %s", exc)
+
         logger.info(f"   ✅ Loaded {len(TOOL_REGISTRY)} tools into registry")
 
     except Exception as e:
@@ -118,6 +149,10 @@ def generate_manifest() -> dict[str, Any]:
     from src.utils.lazy_tool_loader import _build_tool_module_map
 
     module_map = _build_tool_module_map()
+    # Meta-tools live in src/utils/meta_tools.py rather than in a tool module.
+    for meta_name in ("unifi_tool_index", "unifi_execute", "unifi_batch", "unifi_batch_status", "unifi_load_tools"):
+        if any(t["name"] == meta_name for t in tools):
+            module_map.setdefault(meta_name, "src.utils.meta_tools")
     missing = sorted(t["name"] for t in tools if t["name"] not in module_map)
     if missing:
         logger.warning("   Tools absent from the module map: %s", missing)

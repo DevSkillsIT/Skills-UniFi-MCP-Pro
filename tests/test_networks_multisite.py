@@ -73,12 +73,6 @@ class TestListNetworksWithSite:
         assert site_validated == "acme"
 
     @pytest.mark.asyncio
-    async def test_list_networks_backward_compatibility_without_site(self):
-        """GREEN: Should list networks without site parameter (default site mode)."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_list_networks_site_not_found_error(self):
         """RED: Should raise SiteNotFoundError for invalid site."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -117,12 +111,6 @@ class TestCreateNetworkWithSite:
         assert site_validated == "bravo"
 
     @pytest.mark.asyncio
-    async def test_create_network_backward_compatibility_without_site(self):
-        """GREEN: Should create network without site parameter (default site mode)."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_create_network_site_not_found_error(self):
         """RED: Should raise SiteNotFoundError for invalid site in create."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -156,12 +144,6 @@ class TestUpdateNetworkWithSite:
 
         site_validated = validate_site_parameter("default")
         assert site_validated == "default"
-
-    @pytest.mark.asyncio
-    async def test_update_network_backward_compatibility_without_site(self):
-        """GREEN: Should update network without site parameter (default site mode)."""
-        # Placeholder for backward compatibility test
-        assert True
 
     @pytest.mark.asyncio
     async def test_update_network_site_not_found_error(self):

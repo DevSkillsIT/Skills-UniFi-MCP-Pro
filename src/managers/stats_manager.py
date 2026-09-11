@@ -28,6 +28,7 @@ from aiounifi.models.dpi_restriction_group import DPIRestrictionGroup
 from aiounifi.models.event import Event
 
 from .base_manager import SiteScopedManager
+from .radio_projection import radio_view, ssid_view
 from .client_manager import ClientManager
 from .connection_manager import ConnectionManager
 
@@ -86,6 +87,7 @@ def _safe_float(value: Any) -> Optional[float]:
         return float(str(value))
     except (TypeError, ValueError):
         return None
+
 
 
 class StatsManager(SiteScopedManager):
@@ -313,16 +315,16 @@ class StatsManager(SiteScopedManager):
         }
         device_type = device.get("type") or ""
         if device_type.startswith(AP_TYPES):
+            live_by_name = {
+                r.get("name"): r for r in (device.get("radio_table_stats") or []) if isinstance(r, dict)
+            }
             snapshot["radios"] = [
-                {
-                    "name": r.get("name"),
-                    "band": r.get("radio"),
-                    "channel": r.get("channel"),
-                    "num_clients": _safe_int(r.get("num_sta")),
-                    "channel_utilization_percent": _safe_int(r.get("cu_total")),
-                    "tx_power_dbm": _safe_int(r.get("tx_power")),
-                }
-                for r in (device.get("radio_table_stats") or [])
+                radio_view(config, live_by_name.get(config.get("name"), {}))
+                for config in (device.get("radio_table") or [])
+                if isinstance(config, dict)
+            ]
+            snapshot["ssids"] = [
+                ssid_view(v) for v in (device.get("vap_table") or []) if isinstance(v, dict)
             ]
         if device_type.startswith(SWITCH_TYPES):
             ports = device.get("port_table") or []
@@ -449,6 +451,154 @@ class StatsManager(SiteScopedManager):
             ]
             self._connection._update_cache(cache_key, result, timeout=120)
             return result
+
+
+    async def get_channel_survey(
+        self,
+        duration_hours: int = 24,
+        site: Optional[str] = None,
+        min_signal_dbm: int = -80,
+        include_empty_channels: bool = False,
+    ) -> Dict[str, Any]:
+        """What competes for the air on each channel, per band.
+
+        Answers the question a channel change is asked to settle: which channel
+        is least occupied by somebody else.
+
+        A raw neighbour count is a misleading answer and the default filter
+        exists because of it. One site here detected 142 networks on 5GHz
+        channel 161 and not one of them was above -80 dBm; the radio's own
+        measured airtime from other sources was 1%. Counting every beacon the
+        access point can hear argues for moving off a channel that is in fact
+        empty. Only a neighbour loud enough to make this AP defer costs
+        anything, so weak ones are counted and then set aside.
+
+        `utilization_others_percent` on the radio itself, in `unifi_get_ap_stats`,
+        is the measurement; this survey is the explanation for it. Where the two
+        disagree, the measurement wins.
+
+        Args:
+            duration_hours: How far back a scan row still counts. A row not seen
+                within the window may be a network that no longer exists, and
+                counting it argues against a channel that is free.
+            site: Site slug or display name.
+            min_signal_dbm: Floor for a neighbour to be treated as competing.
+                -80 dBm is about where a neighbour starts costing airtime; pass
+                a lower value to widen it, or -100 to keep everything.
+            include_empty_channels: Also list channels with no competing
+                neighbour. Off by default: on a 6GHz band that is 59 channels of
+                zeroes, which is most of the response and none of the answer.
+
+        Returns:
+            Per band: how many neighbours were heard, how many pass the floor,
+            the channels that carry them, and the quietest non-DFS candidates.
+        """
+        target = self._target_site(site)
+        max_age = duration_hours * 3600
+
+        try:
+            neighbours = await self._list("post", "/stat/rogueap", {}, site=site)
+        except Exception as e:
+            logger.error(f"Neighbour scan failed (site={target}): {e}")
+            neighbours = []
+
+        country = await self._one("get", "/stat/current-channel", site=site) or {}
+        devices = await self._devices(site=site)
+
+        # Keyed by (band, channel): channel numbers repeat across bands -- 161
+        # exists on both 5GHz and 6GHz -- so a channel-only key reports a radio
+        # as sitting on a band it does not even have.
+        own_by_channel: Dict[tuple, List[str]] = {}
+        radios_per_band: Dict[str, int] = {}
+        for device in devices:
+            if not (device.get("type") or "").startswith(AP_TYPES):
+                continue
+            for live in device.get("radio_table_stats") or []:
+                code = live.get("radio")
+                radios_per_band[code] = radios_per_band.get(code, 0) + 1
+                channel = live.get("channel")
+                if channel is not None:
+                    own_by_channel.setdefault((code, channel), []).append(
+                        f"{device.get('name') or device.get('mac')}/{live.get('name')}"
+                    )
+
+        fresh = [
+            n
+            for n in neighbours
+            if isinstance(n, dict) and _safe_int(n.get("age")) <= max_age and n.get("channel") is not None
+        ]
+
+        bands: Dict[str, Any] = {}
+        for radio_code, label in (("ng", "2.4GHz"), ("na", "5GHz"), ("6e", "6GHz")):
+            # A band this site has no radio on cannot be acted on, and reporting
+            # it is pure volume.
+            if not radios_per_band.get(radio_code):
+                continue
+            permitted = country.get(f"channels_{radio_code}")
+            if not isinstance(permitted, list) or not permitted:
+                continue
+
+            dfs = set(country.get(f"channels_{radio_code}_dfs") or [])
+            on_band = [n for n in fresh if n.get("band") == radio_code or n.get("radio") == radio_code]
+            competing = [n for n in on_band if _safe_int(n.get("signal")) >= min_signal_dbm]
+
+            per_channel = []
+            for channel in permitted:
+                here = [n for n in competing if n.get("channel") == channel]
+                heard = sum(1 for n in on_band if n.get("channel") == channel)
+                used_by = own_by_channel.get((radio_code, channel), [])
+                if not here and not used_by and not include_empty_channels:
+                    continue
+                signals = [_safe_int(n.get("signal")) for n in here]
+                per_channel.append(
+                    {
+                        "channel": channel,
+                        "competing_neighbours": len(here),
+                        "neighbours_heard": heard,
+                        "strongest_dbm": max(signals) if signals else None,
+                        "loudest_essid": max(here, key=lambda n: _safe_int(n.get("signal"))).get("essid")
+                        if here
+                        else None,
+                        "is_dfs": channel in dfs,
+                        "used_by_this_site": used_by,
+                    }
+                )
+
+            occupied = {c["channel"] for c in per_channel if c["competing_neighbours"]}
+            free = [c for c in permitted if c not in occupied and c not in dfs]
+
+            bands[label] = {
+                "radio_code": radio_code,
+                "radios_on_this_site": radios_per_band.get(radio_code, 0),
+                "neighbours_heard": len(on_band),
+                "neighbours_competing": len(competing),
+                "channels": per_channel,
+                "channels_with_no_competitor": free[:12],
+                "widths_available": sorted(
+                    width
+                    for width in (40, 80, 160, 320)
+                    if country.get(f"channels_{radio_code}_{width}")
+                ),
+            }
+
+        return {
+            "site": target,
+            "regulatory_domain": country.get("name"),
+            "window_hours": duration_hours,
+            "min_signal_dbm": min_signal_dbm,
+            "neighbours_heard_total": len(neighbours),
+            "bands": bands,
+            "basis": (
+                f"Neighbours come from the access points' own scan, kept when seen within "
+                f"{duration_hours}h and at or above {min_signal_dbm} dBm. 'neighbours_heard' counts "
+                "everything detected; 'competing_neighbours' counts only those loud enough to take "
+                "airtime. Channels with neither a competitor nor one of this site's radios are "
+                "omitted unless include_empty_channels is set. DFS channels are excluded from "
+                "channels_with_no_competitor because radar detection can force a radio off them. "
+                "The authoritative figure for interference is utilization_others_percent on the "
+                "radio itself, in unifi_get_ap_stats; this survey explains it."
+            ),
+        }
 
     # ------------------------------------------------------------------
     # System

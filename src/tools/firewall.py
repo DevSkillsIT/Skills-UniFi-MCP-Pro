@@ -322,32 +322,126 @@ async def toggle_firewall_policy(
         return {"success": False, "error": str(e)}
 
 
+async def _resolve_policy_endpoint(endpoint: Dict[str, str], site_slug: Optional[str]) -> Dict[str, Any]:
+    """Expand one compact src/dst selector into the controller endpoint structure.
+
+    Args:
+        endpoint: Selector with "type" (zone, network, client_mac, ip_group) and "value".
+        site_slug: Site the policy is being created on.
+
+    Returns:
+        The endpoint dict the V2 firewall-policies endpoint expects.
+
+    Raises:
+        ValueError: Unsupported selector type, or a named network absent from the site.
+    """
+    etype = endpoint["type"].lower()
+    value = endpoint["value"].strip()
+    base = {
+        "match_opposite_ports": False,
+        "port_matching_type": "any",
+    }
+    if etype == "zone":
+        return {**base, "matching_target": "zone", "zone_id": value.lower()}
+    if etype == "network":
+        # Networks are looked up on the same site the policy lands on, so a name
+        # never resolves against a like-named network of another site.
+        networks = await network_manager.get_networks(site=site_slug)
+        net = next(
+            (n for n in networks if n.get("_id") == value or n.get("name") == value),
+            None,
+        )
+        if not net:
+            raise ValueError(f"Network '{value}' not found")
+        return {
+            **base,
+            "matching_target": "network_id",
+            "network_id": net["_id"],
+            "zone_id": "lan",  # network selectors still need a zone for the API; default lan
+        }
+    if etype == "client_mac":
+        return {
+            **base,
+            "matching_target": "client_macs",
+            "client_macs": [value.lower()],
+            "zone_id": "lan",
+        }
+    if etype == "ip_group":
+        return {
+            **base,
+            "matching_target": "ip_group_id",
+            "ip_group_id": value,
+            "zone_id": "lan",
+        }
+    raise ValueError(f"Unsupported selector type '{etype}'")
+
+
+async def _expand_simple_policy(policy: Dict[str, Any], site_slug: Optional[str]) -> Dict[str, Any]:
+    """Build the controller payload from a validated compact policy.
+
+    Raises:
+        ValueError: Propagated from selector expansion.
+    """
+    return {
+        "name": policy["name"],
+        "ruleset": policy["ruleset"],
+        "action": policy["action"].lower(),
+        "index": policy.get("index", 3000),  # the controller needs a position; default late in the ruleset
+        "enabled": policy.get("enabled", True),
+        "logging": policy.get("log", False),
+        "protocol": policy.get("protocol", "all"),
+        # inclusive over every state keeps the compact form matching the traffic a
+        # user means when they say "block this"
+        "connection_state_type": "inclusive",
+        "connection_states": ["new", "established", "related", "invalid"],
+        "source": await _resolve_policy_endpoint(policy["src"], site_slug),
+        "destination": await _resolve_policy_endpoint(policy["dst"], site_slug),
+    }
+
+
 @server.tool(
     name="unifi_create_firewall_policy",
-    description="Criação de política de firewall UniFi Network com validação de schema — nova regra, filtro ou controle de segurança com confirmação obrigatória. Use quando precisar adicionar proteção personalizada, implementar bloqueio específico ou configurar permissão de tráfego. Executa validação e cria política no controlador UniFi com suporte multi-site.",
+    description="Políticas e regras de firewall no UniFi Network — criação por forma compacta (seletores src/dst de zona, rede, MAC ou grupo de IPs) ou por payload completo da API V2, detectada automaticamente pelo formato enviado. Use quando precisar bloquear, liberar ou filtrar tráfego entre zonas e redes. Retorna preview com confirm=false e a política criada no UniFi com confirm=true.",
     permission_category="firewall_policies",
     permission_action="create",
 )
 async def create_firewall_policy(
     policy_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
-    """
-    Creates a new firewall policy based on the provided configuration data.
-    This tool performs validation on the input data against the expected UniFi API schema.
-    Requires confirmation.
+    """Create a firewall policy from either a compact or a controller-shaped definition.
 
-    **Crucial Note:** The structure of `policy_data` needs to match the UniFi controller's
-    expectations for the V2 `/firewall-policies` endpoint. Refer to UniFi documentation
-    or examine existing policies using `unifi_get_firewall_policy_details` for the exact structure.
+    Two input shapes are accepted in `policy_data`; the shape is detected from the
+    keys, never declared by the caller.
 
-    **Required** keys in `policy_data`:
+    **Compact shape** -- high-level selectors, expanded here into the controller
+    structure:
+    {
+        "name":    "Block Xbox",
+        "ruleset": "LAN_OUT",
+        "action":  "drop",
+        "src": {"type": "client_mac", "value": "4c:3b:df:2c:c8:c6"},
+        "dst": {"type": "zone", "value": "wan"},
+        "protocol": "all",            # optional, default "all"
+        "index": 2010,                # optional, defaults to 3000
+        "enabled": True,              # optional, default True
+        "log": True                   # optional, default False
+    }
+    Selector types: "zone", "network" (name or id), "client_mac", "ip_group".
+    Connection states and port matching get sane defaults; use the complete shape
+    when those need to be controlled.
+
+    **Complete shape** -- the payload the V2 `/firewall-policies` endpoint expects,
+    sent through untouched. Refer to UniFi documentation or examine existing policies
+    using `unifi_get_firewall_policy_details` for the exact structure.
+
+    **Required** keys in the complete shape:
     - name (string): A descriptive name for the firewall policy.
     - ruleset (string): The target ruleset (e.g., "WAN_IN", "LAN_OUT", "GUEST_LOCAL").
     - action (string): The action to take (must be lowercase: "accept", "drop", "reject").
     - index (integer): The position/priority of the rule within the ruleset (lower numbers execute first).
                        Note: API internally uses 'index', not 'rule_index'.
 
-    **Common Optional** keys in `policy_data`:
+    **Common Optional** keys in the complete shape:
     - enabled (boolean): Whether the rule is active upon creation (default: True).
     - description (string): A brief description of the rule's purpose.
     - logging (boolean): Enable logging for matched traffic (default: False).
@@ -359,7 +453,7 @@ async def create_firewall_policy(
     - icmp_v6_typename (string): Specific ICMPv6 type name (if protocol is "icmpv6").
     - ... and other fields specific to the UniFi API.
 
-    Example `policy_data` (Simple Block):
+    Example `policy_data` (complete shape, simple block):
     {
         "name": "Block Xbox LAN Out",
         "ruleset": "LAN_OUT",
@@ -388,8 +482,9 @@ async def create_firewall_policy(
     }
 
     Args:
-        policy_data (Dict[str, Any]): A dictionary containing the firewall policy configuration.
-        confirm (bool): Must be explicitly set to `True` to execute the creation. Defaults to `False`.
+        policy_data (Dict[str, Any]): The firewall policy configuration, in either shape.
+        confirm (bool): Must be explicitly set to `True` to execute the creation. Defaults to `False`,
+                        which returns the fully expanded payload as a preview.
         site: Optional site name/slug. If None, uses current default site.
               Accepts fuzzy matching (e.g., "Acme", "acme", "grupo-acme" for "Grupo Acme")
 
@@ -420,37 +515,52 @@ async def create_firewall_policy(
         }
 
     try:
+        # Resolved up front because expanding a compact "network" selector has to
+        # query the same site the policy will be created on.
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # --- Use Validator Registry for Comprehensive Validation ---
-        # This replaces the basic required field checks below
-        from src.validator_registry import UniFiValidatorRegistry
+        # "src"/"dst" exist only in the compact shape -- the controller shape spells
+        # them "source"/"destination". Choosing the schema from that marker keeps a
+        # validation error attributable to the shape the caller actually sent,
+        # instead of reporting the other shape's missing fields.
+        is_compact = "src" in policy_data or "dst" in policy_data
 
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("firewall_policy_create", policy_data)
-
-        if not is_valid:
-            logger.warning(f"Invalid firewall policy data: {error_msg}")
-            # Provide the specific validation error back to the caller
-            return {"success": False, "error": f"Validation Error: {error_msg}"}
-        # --- End Validation ---
-
-        # Enforce lowercase action (Validator might also handle this depending on schema definition)
-        action = validated_data.get("action", "")
-        if not isinstance(action, str) or action.lower() not in [
-            "accept",
-            "drop",
-            "reject",
-        ]:
-            # This check might be redundant if the validator enforces enum values
-            error = (
-                f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
+        if is_compact:
+            is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate(
+                "firewall_policy_simple", policy_data
             )
-            logger.warning(error)
-            return {"success": False, "error": error}
-        validated_data["action"] = action.lower()  # Normalize in the validated data
+            if not is_valid or validated_data is None:
+                logger.warning(f"Invalid compact firewall policy data: {error_msg}")
+                return {"success": False, "error": f"Validation Error: {error_msg}"}
 
-        # Use the validated and potentially cleaned/defaulted data
-        policy_data_to_send = validated_data
+            try:
+                policy_data_to_send = await _expand_simple_policy(validated_data, site_slug)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
+        else:
+            is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate(
+                "firewall_policy_create", policy_data
+            )
+            if not is_valid or validated_data is None:
+                logger.warning(f"Invalid firewall policy data: {error_msg}")
+                # Provide the specific validation error back to the caller
+                return {"success": False, "error": f"Validation Error: {error_msg}"}
+
+            # Enforce lowercase action (Validator might also handle this depending on schema definition)
+            action = validated_data.get("action", "")
+            if not isinstance(action, str) or action.lower() not in [
+                "accept",
+                "drop",
+                "reject",
+            ]:
+                # This check might be redundant if the validator enforces enum values
+                error = f"Invalid 'action' after validation: '{action}'. Must be one of 'accept', 'drop', 'reject' (lowercase)."
+                logger.warning(error)
+                return {"success": False, "error": error}
+            validated_data["action"] = action.lower()  # Normalize in the validated data
+
+            # Use the validated and potentially cleaned/defaulted data
+            policy_data_to_send = validated_data
 
         policy_name = policy_data_to_send.get("name", "Unnamed Policy")
         ruleset = policy_data_to_send.get("ruleset", "Unknown Ruleset")
@@ -464,7 +574,6 @@ async def create_firewall_policy(
 
         logger.info(f"Attempting to create firewall policy '{policy_name}' in ruleset '{ruleset}'")
 
-        # Call the new manager method
         created_policy_obj = await firewall_manager.create_firewall_policy(policy_data_to_send, site=site_slug)
 
         if created_policy_obj and hasattr(created_policy_obj, "raw"):
@@ -485,8 +594,6 @@ async def create_firewall_policy(
         else:
             # The manager method should log specific errors, return a generic failure here.
             logger.error(f"Failed to create firewall policy '{policy_name}'. Manager returned None or invalid object.")
-            # Try to get a more specific error from the manager logs if possible.
-            # You might enhance the manager to return error details instead of just None.
             return {
                 "success": False,
                 "error": f"Failed to create firewall policy '{policy_name}'. Check manager logs for details (e.g., API errors, invalid data).",
@@ -678,128 +785,6 @@ async def update_firewall_policy(
     except Exception as e:
         logger.error(f"Error updating firewall policy {policy_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-
-
-@server.tool(
-    name="unifi_create_simple_firewall_policy",
-    description="Criação simplificada de política de firewall UniFi Network com schema de alto nível — nova regra ou filtro usando seletores amigáveis src/dst e preview antes da confirmação. Use quando precisar adicionar proteção rapidamente ou configurar bloqueio simples. Retorna preview expandido ou cria política no controlador UniFi com validação automática.",
-    permission_category="firewall_policies",
-    permission_action="create",
-)
-async def create_simple_firewall_policy(policy: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
-    """Create a firewall rule with a compact schema and optional preview.
-
-    High-level schema (validated internally):
-    {
-        "name":    "Block Xbox",
-        "ruleset": "LAN_OUT",
-        "action":  "drop",
-        "src": {"type": "client_mac", "value": "4c:3b:df:2c:c8:c6"},
-        "dst": {"type": "zone", "value": "wan"},
-        "protocol": "all",           # optional
-        "index": 2010,                # optional – will auto-place if omitted
-        "enabled": true,              # default true
-        "log": true                   # default false
-    }
-
-    If *confirm* is False (default) the function only validates and returns the
-    fully-expanded UniFi payload in a preview. Set *confirm* to True to commit
-    the rule and return the controller's response.
-    """
-
-    if not parse_permission(config.permissions, "firewall", "create"):
-        return {"success": False, "error": "Permission denied."}
-
-    # --- Step 1: validate high-level schema --------------------------------
-    is_valid, error, validated = UniFiValidatorRegistry.validate("firewall_policy_simple", policy)
-    if not is_valid or validated is None:
-        return {"success": False, "error": error or "Validation failed"}
-
-    pol = validated  # rename for brevity
-
-    # --- Step 2: translate src/dst selectors into UniFi endpoint structure --
-    async def _resolve_endpoint(ep: Dict[str, str]) -> Dict[str, Any]:
-        etype = ep["type"].lower()
-        value = ep["value"].strip()
-        base = {
-            "match_opposite_ports": False,
-            "port_matching_type": "any",
-        }
-        if etype == "zone":
-            return {**base, "matching_target": "zone", "zone_id": value.lower()}
-        if etype == "network":
-            # Accept network name or id
-            networks = await network_manager.get_networks()
-            net = next(
-                (n for n in networks if n.get("_id") == value or n.get("name") == value),
-                None,
-            )
-            if not net:
-                raise ValueError(f"Network '{value}' not found")
-            return {
-                **base,
-                "matching_target": "network_id",
-                "network_id": net["_id"],
-                "zone_id": "lan",  # network selectors still need zone for API; default lan
-            }
-        if etype == "client_mac":
-            return {
-                **base,
-                "matching_target": "client_macs",
-                "client_macs": [value.lower()],
-                "zone_id": "lan",
-            }
-        if etype == "ip_group":
-            return {
-                **base,
-                "matching_target": "ip_group_id",
-                "ip_group_id": value,
-                "zone_id": "lan",
-            }
-        raise ValueError(f"Unsupported selector type '{etype}'")
-
-    try:
-        src_ep = await _resolve_endpoint(pol["src"])
-        dst_ep = await _resolve_endpoint(pol["dst"])
-    except Exception as exc:
-        return {"success": False, "error": str(exc)}
-
-    # --- Step 3: build controller payload ----------------------------------
-    payload: Dict[str, Any] = {
-        "name": pol["name"],
-        "ruleset": pol["ruleset"],
-        "action": pol["action"].lower(),
-        "index": pol.get("index", 3000),  # fall-back index
-        "enabled": pol.get("enabled", True),
-        "logging": pol.get("log", False),
-        "protocol": pol.get("protocol", "all"),
-        # sane defaults for connection states (inclusive all)
-        "connection_state_type": "inclusive",
-        "connection_states": ["new", "established", "related", "invalid"],
-        "source": src_ep,
-        "destination": dst_ep,
-    }
-
-    if not confirm and not should_auto_confirm():
-        return create_preview(
-            resource_type="firewall_policy",
-            resource_data=payload,
-            resource_name=pol["name"],
-        )
-
-    # --- Step 4: call manager to create policy -----------------------------
-    created = await firewall_manager.create_firewall_policy(payload)
-    if created is None:
-        return {
-            "success": False,
-            "error": "Controller rejected policy creation. See logs.",
-        }
-
-    return {
-        "success": True,
-        "policy_id": created.id,
-        "details": created.raw,
-    }
 
 
 @server.tool(

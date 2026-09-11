@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 # Operations whose effect is immediate and visible to users of the network, and
 # which no later call can undo. Auto-confirm does not cover these: an agent that
 # merely wanted to see what a reboot would do must not cause one.
-ALWAYS_CONFIRM_ACTIONS = frozenset({"reboot", "restart", "upgrade", "adopt", "restore"})
+ALWAYS_CONFIRM_ACTIONS = frozenset({"reboot", "restart", "upgrade", "adopt", "restore", "set_radio"})
 
 
 def should_auto_confirm(action: Optional[str] = None) -> bool:
@@ -31,6 +31,8 @@ def should_auto_confirm(action: Optional[str] = None) -> bool:
         action: The operation about to run. When it is one of
             ALWAYS_CONFIRM_ACTIONS, the answer is False no matter what the
             environment says, and the caller must pass confirm=True explicitly.
+            A radio change is on that list because it re-provisions the access
+            point and drops every wireless client on the band.
 
     Returns:
         True when the preview may be skipped.

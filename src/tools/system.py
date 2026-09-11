@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 @server.tool(
-    name="list_sites",
+    name="unifi_list_sites",
     description="Sites disponíveis no controlador UniFi Network — identificadores, nomes e descrições de todos os sites que a whitelist permite operar. Use quando precisar listar sites, auditar ambientes ou descobrir o identificador correto para o parâmetro site das demais tools. Retorna o _id real do site, o slug usado nos caminhos da API e o nome legível no controlador UniFi.",
 )
 async def list_sites() -> Dict[str, Any]:

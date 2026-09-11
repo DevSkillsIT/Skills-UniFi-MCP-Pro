@@ -47,7 +47,7 @@ A self-hosted [Model Context Protocol](https://github.com/modelcontextprotocol) 
 * Full catalog of UniFi controller operations – firewall, traffic-routes, port-forwards, QoS, VPN, WLANs, stats, devices, clients **and more**.
 * All mutating tools require `confirm=true` so nothing can change your network by accident.
 * **Workflow automation friendly** – set `UNIFI_AUTO_CONFIRM=true` to skip confirmation prompts (ideal for n8n, Make, Zapier).
-* Works over **stdio** (FastMCP). Optional SSE HTTP endpoint can be enabled via config.
+* Works over **stdio** (FastMCP). An optional Streamable HTTP endpoint on `/mcp` can be enabled via config.
 * **Code execution mode** with tool index, async operations, and TypeScript examples.
 * One-liner launch via the console-script **`unifi-network-mcp`**.
 * Idiomatic Python ≥ 3.13, packaged with **pyproject.toml** and ready for PyPI.
@@ -148,8 +148,8 @@ This implementation follows the patterns described in [Anthropic's Code Executio
 
 The server now supports **lazy tool registration** to dramatically reduce LLM context usage.
 
-**🎯 DEFAULT: Lazy Mode (lazy)** ⭐⭐⭐ **Active in v0.2.0!**
-- Registers only 3 meta-tools initially
+**🎯 DEFAULT: Lazy Mode (lazy)** ⭐⭐⭐
+- Registers 5 meta-tools initially (`unifi_tool_index`, `unifi_execute`, `unifi_batch`, `unifi_batch_status`, `unifi_load_tools`)
 - ~200 tokens consumed (96% reduction!)
 - Tools loaded automatically on first use
 - **Seamless UX** - no manual discovery needed
@@ -157,14 +157,14 @@ The server now supports **lazy tool registration** to dramatically reduce LLM co
 - **Active by default** - no configuration needed
 
 **Eager Mode (eager):**
-- Registers all 67 tools immediately
+- Registers every tool the permissions configuration allows
 - ~5,000 tokens consumed for tool schemas
 - All tools visible in context from start
 - **Best for:** Dev console, automation scripts
 - **How to enable:** Set `UNIFI_TOOL_REGISTRATION_MODE=eager`
 
 **Meta-Only Mode (meta_only):**
-- Registers only 3 meta-tools initially
+- Registers 4 meta-tools initially (`unifi_tool_index`, `unifi_execute`, `unifi_batch`, `unifi_batch_status`)
 - ~200 tokens consumed (96% reduction!)
 - Requires `unifi_tool_index` call for discovery
 - **Best for:** Maximum control
@@ -485,9 +485,9 @@ After editing the config **restart Claude Desktop**, then test with:
 @unifi-network-mcp list tools
 ```
 
-### Optional HTTP SSE endpoint (off by default)
+### Optional Streamable HTTP endpoint (off by default)
 
-For environments where HTTP is acceptable (e.g., local development), you can enable the HTTP SSE server and expose it explicitly:
+For environments where HTTP is acceptable (e.g., local development), you can enable the Streamable HTTP endpoint and expose it explicitly. It is served on `/mcp`; stdio keeps running alongside it:
 
 ```bash
 docker run -i --rm \
@@ -497,7 +497,9 @@ docker run -i --rm \
   ghcr.io/sirkirby/unifi-network-mcp:latest
 ```
 
-Set `UNIFI_MCP_HTTP_PORT` (and optionally `UNIFI_MCP_HTTP_HOST`) if you need a different bind port/host for the SSE endpoint.
+Set `UNIFI_MCP_HTTP_PORT` (and optionally `UNIFI_MCP_HTTP_HOST` or `UNIFI_MCP_HTTP_PATH`) if you need a different bind port, host or path.
+
+The endpoint binds `0.0.0.0` and exposes tools that reboot access points, block clients and rewrite networks. Set `UNIFI_MCP_BEARER_TOKEN` and every request must carry `Authorization: Bearer <token>`; leave it unset and anything that can reach the port can drive the controller. `/health` answers without a token so a probe can tell a locked door from a dead process.
 
 Security note: Leave this disabled in production or sensitive environments. The stdio transport remains the default and recommended mode.
 
@@ -519,10 +521,12 @@ The server merges settings from **environment variables**, an optional `.env` fi
 | `UNIFI_SITE` | Site name (default `default`) |
 | `UNIFI_VERIFY_SSL` | Set to `false` if using self-signed certs |
 | `UNIFI_CONTROLLER_TYPE` | Controller API path type: `auto` (detect), `proxy` (UniFi OS), `direct` (standalone). Default `auto` |
-| `UNIFI_MCP_HTTP_ENABLED` | Set `true` to enable optional HTTP SSE server (default `false`) |
-| `UNIFI_MCP_HTTP_HOST` | Bind address for HTTP SSE (default `0.0.0.0`) |
-| `UNIFI_MCP_HTTP_PORT` | Port for HTTP SSE (default `3000`) |
-| `UNIFI_AUTO_CONFIRM` | Set `true` to auto-confirm all mutating operations (skips preview step). Ideal for workflow automation (n8n, Make, Zapier). Default `false` |
+| `UNIFI_MCP_HTTP_ENABLED` | Set `true` to serve the Streamable HTTP endpoint alongside stdio (default `false`) |
+| `UNIFI_MCP_HTTP_HOST` | Bind address for the HTTP endpoint (default `0.0.0.0`) |
+| `UNIFI_MCP_HTTP_PORT` | Port for the HTTP endpoint (default `3000`) |
+| `UNIFI_MCP_HTTP_PATH` | Path the Streamable HTTP endpoint is served on (default `/mcp`) |
+| `UNIFI_MCP_BEARER_TOKEN` | Bearer token required on every HTTP request. When unset, the endpoint accepts unauthenticated requests and says so loudly at startup. `/health` never requires the token |
+| `UNIFI_AUTO_CONFIRM` | Set `true` to skip the preview step for reversible mutating operations. Ideal for workflow automation (n8n, Make, Zapier). Default `false`. Does not cover `reboot`, `restart`, `upgrade`, `adopt`, `restore` or `set_radio`, which always require `confirm=true` |
 | `UNIFI_TOOL_REGISTRATION_MODE` | Tool loading mode: `lazy` (default), `eager`, or `meta_only`. See [Context Optimization](#context-optimization) |
 | `UNIFI_ENABLED_CATEGORIES` | Comma-separated list of tool categories to load (eager mode). See table below |
 | `UNIFI_ENABLED_TOOLS` | Comma-separated list of specific tool names to register (eager mode) |
@@ -533,21 +537,21 @@ When using eager mode with category filtering, these are the valid category name
 
 | Category | Description | Example Tools |
 |----------|-------------|---------------|
-| `clients` | Client listing, blocking, guest auth | `unifi_list_clients`, `unifi_block_client` |
-| `config` | Configuration management | - |
-| `devices` | Device listing, reboot, locate, upgrade | `unifi_list_devices`, `unifi_reboot_device` |
+| `clients` | Client listing, blocking, guest auth, fixed IP | `unifi_list_clients`, `unifi_block_client` |
+| `config` | Site settings | `unifi_get_site_settings` |
+| `devices` | Device listing and device actions | `unifi_list_devices`, `unifi_manage_device` |
 | `events` | Events and alarms | `unifi_list_events`, `unifi_list_alarms` |
-| `firewall` | Firewall rules and groups | `unifi_list_firewall_rules`, `unifi_create_firewall_rule` |
+| `firewall` | Firewall policies, zones, IP groups | `unifi_list_firewall_policies`, `unifi_create_firewall_policy` |
 | `hotspot` | Vouchers for guest network | `unifi_list_vouchers`, `unifi_create_voucher` |
-| `network` | Network/VLAN management | `unifi_list_networks`, `unifi_create_network` |
+| `network` | Network/VLAN and WLAN management | `unifi_list_networks`, `unifi_create_network` |
 | `port_forwards` | Port forwarding rules | `unifi_list_port_forwards` |
 | `qos` | QoS/traffic shaping rules | `unifi_list_qos_rules`, `unifi_create_qos_rule` |
-| `routing` | Static routes (V1 API) | `unifi_list_routes`, `unifi_create_route` |
+| `routing` | Static routes (V1 API) | `unifi_list_static_routes`, `unifi_create_static_route` |
 | `stats` | Statistics and metrics | `unifi_get_client_stats`, `unifi_get_device_stats` |
-| `system` | System info, health, settings | `unifi_get_system_info`, `unifi_get_network_health` |
+| `system` | System info, status, sites, SNMP | `unifi_get_system_info`, `unifi_list_sites` |
 | `traffic_routes` | Policy-based routing (V2 API) | `unifi_list_traffic_routes` |
-| `usergroups` | Bandwidth profiles/user groups | `unifi_list_usergroups`, `unifi_create_usergroup` |
-| `vpn` | VPN servers and clients | `unifi_list_vpn_servers`, `unifi_list_vpn_clients` |
+| `usergroups` | Bandwidth profiles/user groups | `unifi_list_user_groups`, `unifi_create_user_group` |
+| `vpn` | VPN configurations | `unifi_list_vpn_configs`, `unifi_create_vpn_config` |
 
 **Example usage:**
 ```bash
@@ -663,7 +667,7 @@ What it does:
 * Executes the tool via the MCP server and prints the JSON result.
 * Prevents execution of disabled tools with helpful permission guidance.
 
-**New in v0.2.0:** The dev console now displays all 64 tools regardless of permission settings:
+The console lists every tool in the catalog regardless of permission settings:
 * Enabled tools are marked with ✓
 * Disabled tools are marked with ✗ [DISABLED]
 * Attempting to run a disabled tool shows permission instructions
@@ -681,12 +685,12 @@ You can provide tool arguments in three ways:
 
 * Paste a JSON object (recommended for complex inputs):
   ```json
-  {"mac_address": "14:1b:4f:dc:5b:cf"}
+  {"mac_address": "aa:bb:cc:dd:ee:ff"}
   ```
 
 * Type a single value when the tool has exactly one required parameter. The console maps it automatically to that key. Example for `unifi_get_client_details`:
 ```bash
-  14:1b:4f:dc:5b:cf
+  aa:bb:cc:dd:ee:ff
   ```
 * Press Enter to skip JSON and the console will interactively prompt for missing required fields (e.g., it will ask for `mac_address`).
 
@@ -741,21 +745,22 @@ python devtools/dev_console.py
 
 ## Security Considerations
 
-These tools will give any LLM or agent configured to use them full access to your UniFi Network Controller. While this can be very useful for analysis and configuration of your network, there is potential for abuse if not configured correctly. By default, all tools that can modify state or disrupt availability are disabled and must be explicitly enabled via **environment variables**. The tools are built directly on the UniFi Network Controller API, so they can operate with similar functionality to the UniFi web interface.
+These tools will give any LLM or agent configured to use them full access to your UniFi Network Controller. While this can be very useful for analysis and configuration of your network, there is potential for abuse if not configured correctly. The tools are built directly on the UniFi Network Controller API, so they can operate with similar functionality to the UniFi web interface. Review `src/config/config.yaml` and the permission variables below before pointing an agent at a production controller: the shipped configuration allows create and update across every category, and restricting them is done with **environment variables**.
 
-### Permission System 🔐 **NEW in v0.2.0**
+### Permission System 🔐
 
-The server includes a comprehensive permission system with **safe defaults**:
+The server gates every mutating tool behind a category and an action, checked when the tool is registered. A tool whose permission is denied is never registered with the MCP server, so an agent cannot call it at all.
 
-**Disabled by Default (High-Risk):**
-- Network creation/modification (`unifi_create_network`, `unifi_update_network`)
-- Wireless configuration (`unifi_create_wlan`, `unifi_update_wlan`)
-- Device operations (`unifi_adopt_device`, `unifi_upgrade_device`, `unifi_reboot_device`)
-- Client operations (`unifi_block_client`, `unifi_authorize_guest`)
+**Refused whatever the configuration says:**
+- Every delete operation (`unifi_delete_static_route`, `unifi_delete_traffic_route`, `unifi_delete_user_group`, `unifi_delete_vpn_config`). Removing a network, WLAN or firewall rule through an LLM is not a reversible mistake, so the gate is in code rather than in configuration.
+- Any action with no entry in its category and no entry under `default` — `unifi_restart_controller` needs `system.admin`, which the shipped configuration does not grant.
 
-**Enabled by Default (Lower Risk):**
-- Firewall policies, traffic routes, port forwards, QoS rules
+**Allowed by the shipped configuration:**
+- Create and update across networks, WLANs, devices, clients, firewall policies, traffic routes, static routes, port forwards, QoS rules, VPN configurations, vouchers and user groups
+- Archiving alarms (`events.update`); creating events is refused
 - All read-only operations
+
+Ask the running server rather than this list: `unifi_tool_index` reports every tool in the catalog, marks which ones are callable, and names the ones the permissions configuration blocked.
 
 **How to Enable Permissions:**
 
@@ -804,6 +809,8 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 
 *All state-changing tools require the extra argument `confirm=true`.*
 
+*`unifi_tool_index` returns this catalog from the running server, with the live count and a flag on each tool saying whether the permissions configuration allows it to be called.*
+
 ### Firewall
 
 * `unifi_list_firewall_policies`
@@ -811,18 +818,18 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 * `unifi_toggle_firewall_policy`
 * `unifi_create_firewall_policy`
 * `unifi_update_firewall_policy`
-* `unifi_create_simple_firewall_policy`
 * `unifi_list_firewall_zones`
 * `unifi_list_ip_groups`
+
+`unifi_create_firewall_policy` accepts either a compact description of the rule or the controller's full policy shape.
 
 ### Traffic Routes
 
 * `unifi_list_traffic_routes`
 * `unifi_get_traffic_route_details`
-* `unifi_toggle_traffic_route`
-* `unifi_update_traffic_route`
 * `unifi_create_traffic_route`
-* `unifi_create_simple_traffic_route`
+* `unifi_update_traffic_route`
+* `unifi_delete_traffic_route`
 
 ### Port Forwarding
 
@@ -831,16 +838,18 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 * `unifi_toggle_port_forward`
 * `unifi_create_port_forward`
 * `unifi_update_port_forward`
-* `unifi_create_simple_port_forward`
+
+`unifi_create_port_forward` accepts either a compact description of the rule or the controller's full shape.
 
 ### QoS / Traffic Shaping
 
 * `unifi_list_qos_rules`
 * `unifi_get_qos_rule_details`
 * `unifi_toggle_qos_rule_enabled`
-* `unifi_update_qos_rule`
 * `unifi_create_qos_rule`
-* `unifi_create_simple_qos_rule`
+* `unifi_update_qos_rule`
+
+`unifi_create_qos_rule` accepts either a compact description of the rule or the controller's full shape.
 
 ### Networks & WLANs
 
@@ -855,21 +864,19 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 
 ### VPN
 
-* `unifi_list_vpn_clients`
-* `unifi_get_vpn_client_details`
-* `unifi_update_vpn_client_state`
-* `unifi_list_vpn_servers`
-* `unifi_get_vpn_server_details`
-* `unifi_update_vpn_server_state`
+* `unifi_list_vpn_configs`
+* `unifi_get_vpn_config_details`
+* `unifi_create_vpn_config`
+* `unifi_update_vpn_config`
+* `unifi_delete_vpn_config`
 
 ### Devices
 
 * `unifi_list_devices`
 * `unifi_get_device_details`
-* `unifi_reboot_device`
-* `unifi_rename_device`
-* `unifi_adopt_device`
-* `unifi_upgrade_device`
+* `unifi_manage_device`
+
+`unifi_manage_device` takes a `mac_address` and an `action`: `reboot`, `adopt`, `rename`, `locate`, `upgrade` or `set_radio`. Each of those requires `confirm=true` explicitly, whatever `UNIFI_AUTO_CONFIRM` is set to.
 
 ### Clients
 
@@ -883,6 +890,7 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 * `unifi_authorize_guest`
 * `unifi_unauthorize_guest`
 * `unifi_set_client_ip_settings`
+* `unifi_lookup_by_ip`
 
 ### Events & Alarms
 
@@ -894,11 +902,11 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 
 ### Routing (Static Routes)
 
-* `unifi_list_routes`
-* `unifi_get_route_details`
-* `unifi_create_route`
-* `unifi_update_route`
-* `unifi_list_active_routes`
+* `unifi_list_static_routes`
+* `unifi_get_static_route_details`
+* `unifi_create_static_route`
+* `unifi_update_static_route`
+* `unifi_delete_static_route`
 
 ### Hotspot (Vouchers)
 
@@ -909,25 +917,31 @@ See [docs/permissions.md](docs/permissions.md) for complete documentation includ
 
 ### User Groups
 
-* `unifi_list_usergroups`
-* `unifi_get_usergroup_details`
-* `unifi_create_usergroup`
-* `unifi_update_usergroup`
+* `unifi_list_user_groups`
+* `unifi_get_user_group_details`
+* `unifi_create_user_group`
+* `unifi_update_user_group`
+* `unifi_delete_user_group`
 
-### Statistics & Alerts
+### Statistics
 
 * `unifi_get_network_stats`
 * `unifi_get_client_stats`
 * `unifi_get_device_stats`
-* `unifi_get_top_clients`
-* `unifi_get_dpi_stats`
-* `unifi_get_alerts`
+* `unifi_get_ap_stats`
+* `unifi_get_switch_stats`
+* `unifi_get_system_stats`
 
 ### System
 
 * `unifi_get_system_info`
-* `unifi_get_network_health`
+* `unifi_get_system_status`
+* `unifi_get_health_check`
 * `unifi_get_site_settings`
+* `unifi_list_sites`
+* `unifi_get_snmp_settings`
+* `unifi_update_snmp_settings`
+* `unifi_restart_controller`
 
 ---
 

@@ -76,12 +76,6 @@ class TestListClientsWithSite:
         assert site_validated == "acme"
 
     @pytest.mark.asyncio
-    async def test_list_clients_backward_compatibility_without_site(self):
-        """GREEN: Should list clients without site parameter (default site mode)."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_list_clients_site_not_found_error(self):
         """RED: Should raise SiteNotFoundError for invalid site."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -141,12 +135,6 @@ class TestGetClientDetailsWithSite:
         assert site_validated == "acme"
 
     @pytest.mark.asyncio
-    async def test_get_client_details_backward_compatibility(self):
-        """GREEN: Should accept mac_address parameter and optional site."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_get_client_details_site_not_found_error(self):
         """RED: Should raise SiteNotFoundError for invalid site."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -182,12 +170,6 @@ class TestBlockClientWithSite:
         assert site_validated == "acme"
 
     @pytest.mark.asyncio
-    async def test_block_client_backward_compatibility(self):
-        """GREEN: Should accept mac_address and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
-
-    @pytest.mark.asyncio
     async def test_block_client_site_not_found_error(self):
         """RED: Should raise SiteNotFoundError for invalid site."""
         from src.utils.site_resolver import resolve_site_identifier
@@ -221,12 +203,6 @@ class TestUnblockClientWithSite:
 
         site_validated = validate_site_parameter("acme")
         assert site_validated == "acme"
-
-    @pytest.mark.asyncio
-    async def test_unblock_client_backward_compatibility(self):
-        """GREEN: Should accept mac_address and optional site parameter."""
-        # Placeholder for backward compatibility test
-        assert True
 
     @pytest.mark.asyncio
     async def test_unblock_client_site_not_found_error(self):
@@ -330,14 +306,6 @@ class TestClientSiteContextManagement:
 
         assert original_site != new_site
         # Context restoration would happen in the try/finally block
-
-    @pytest.mark.asyncio
-    async def test_client_operations_preserve_site_context(self):
-        """REFACTOR: Multiple client operations should not affect site context."""
-        # Validates that querying clients from different sites
-        # doesn't affect the global site context after operations complete
-        assert True  # Will be validated in implementation
-
 
 class TestClientMultiSiteIntegration:
     """Integration tests for multi-site client operations."""
