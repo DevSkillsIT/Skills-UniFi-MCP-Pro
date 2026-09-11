@@ -293,13 +293,13 @@ if UNIFI_CONTROLLER_TYPE not in VALID_CONTROLLER_TYPES:
 # Valid values: "eager" (all tools immediately), "lazy" (on-demand loading), "meta_only" (just meta-tools)
 # DEFAULT: "lazy" (New in v0.2.0) - Provides 96% token savings with seamless UX
 VALID_REGISTRATION_MODES = {"lazy", "eager", "meta_only"}
-UNIFI_TOOL_REGISTRATION_MODE = "eager"  # Force eager mode for immediate tool availability
+UNIFI_TOOL_REGISTRATION_MODE = os.getenv("UNIFI_TOOL_REGISTRATION_MODE", "eager").strip().lower()
 
 # Validate registration mode
 if UNIFI_TOOL_REGISTRATION_MODE not in VALID_REGISTRATION_MODES:
     logger.warning(
-        f"Invalid UNIFI_TOOL_REGISTRATION_MODE: '{UNIFI_TOOL_REGISTRATION_MODE}'. "
-        f"Must be one of: {', '.join(sorted(VALID_REGISTRATION_MODES))}. "
-        f"Defaulting to 'lazy'."
+        "Invalid UNIFI_TOOL_REGISTRATION_MODE: '%s'. Must be one of: %s. Using 'eager'.",
+        UNIFI_TOOL_REGISTRATION_MODE,
+        ", ".join(sorted(VALID_REGISTRATION_MODES)),
     )
-    UNIFI_TOOL_REGISTRATION_MODE = "lazy"
+    UNIFI_TOOL_REGISTRATION_MODE = "eager"

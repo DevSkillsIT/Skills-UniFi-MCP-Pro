@@ -316,13 +316,13 @@ class FirewallManager(SiteScopedManager):
 
         Args:
             rule_data: Rule configuration. `name`, `dst_port`, `fwd_port` and
-                `fwd_ip` are required.
+                the destination (`fwd`) are required.
             site: Site slug or whitelisted display name.
 
         Returns:
             The created rule object, carrying its `_id`, or None on failure.
         """
-        required_keys = {"name", "dst_port", "fwd_port", "fwd_ip"}
+        required_keys = {"name", "dst_port", "fwd_port"}
         missing = required_keys - rule_data.keys()
         if missing:
             logger.error(f"Missing required keys for creating port forward: {sorted(missing)}")

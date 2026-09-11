@@ -4,7 +4,7 @@ from typing import Any, Dict
 # Port forwarding rule schema
 PORT_FORWARD_SCHEMA = {
     "type": "object",
-    "required": ["name", "dst_port", "fwd_port", "fwd_ip"],
+    "required": ["name", "dst_port", "fwd_port"],
     "properties": {
         "name": {
             "type": "string",
@@ -18,7 +18,10 @@ PORT_FORWARD_SCHEMA = {
             "type": "string",
             "description": "Port to forward to (internal port)",
         },
-        "fwd_ip": {"type": "string", "description": "IP address to forward to"},
+        # The controller stores the destination under `fwd`; `fwd_ip` is kept as
+        # an accepted alias because callers and older payloads spell it that way.
+        "fwd": {"type": "string", "description": "IP address to forward to"},
+        "fwd_ip": {"type": "string", "description": "Alias of fwd"},
         "protocol": {
             "type": "string",
             "enum": ["tcp", "udp", "tcp_udp"],

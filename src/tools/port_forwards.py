@@ -12,7 +12,22 @@ from src.utils.permissions import parse_permission
 from src.utils.site_context import resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry  # Added for validation
 
-logger = logging.getLogger(__name__)  # Changed logger name for consistency
+logger = logging.getLogger(__name__)
+
+# Ports the controller stores as strings, including ranges like "10000-10010".
+# A caller writing a port as a number is writing it the ordinary way, so it is
+# coerced here rather than refused with a type error that reads like a typo.
+PORT_FIELDS = ("ext_port", "int_port", "dst_port", "fwd_port")
+
+
+def _coerce_ports(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Render numeric port values as the strings the schema and controller use."""
+    coerced = dict(payload)
+    for field in PORT_FIELDS:
+        value = coerced.get(field)
+        if isinstance(value, int) and not isinstance(value, bool):
+            coerced[field] = str(value)
+    return coerced
 
 
 @server.tool(
@@ -73,8 +88,8 @@ async def list_port_forwards(site: Optional[str] = None) -> Dict[str, Any]:
                 "enabled": r.get("enabled"),
                 "src_port": r.get("dst_port"),  # Note: UniFi uses dst_port for external
                 "dst_port": r.get("fwd_port"),  # Note: UniFi uses fwd_port for internal
-                "protocol": r.get("protocol"),
-                "dest_ip": r.get("fwd_ip"),
+                "protocol": r.get("proto"),
+                "dest_ip": r.get("fwd"),
             }
             for r in rules_raw
         ]
@@ -120,8 +135,8 @@ async def get_port_forward(
             "enabled": True,
             "dst_port": "80",
             "fwd_port": "8080",
-            "fwd_ip": "192.168.1.100",
-            "protocol": "tcp",
+            "fwd": "192.168.1.100",
+            "proto": "tcp",
             "site_id": "...",
             # ... other fields
         }
@@ -223,7 +238,7 @@ async def toggle_port_forward(
                 current_enabled=current_enabled,
                 additional_info={
                     "dst_port": rule.get("dst_port"),
-                    "fwd_ip": rule.get("fwd_ip"),
+                    "fwd": rule.get("fwd"),
                     "fwd_port": rule.get("fwd_port"),
                 },
             )
@@ -271,7 +286,7 @@ async def toggle_port_forward(
 # Create Port Forward
 @server.tool(
     name="unifi_create_port_forward",
-    description="Port forwarding e NAT no UniFi Network — criação de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd_ip), detectada automaticamente pelo formato enviado. Use quando precisar expor serviço interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
+    description="Port forwarding e NAT no UniFi Network — criação de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd), detectada automaticamente pelo formato enviado. Use quando precisar expor serviço interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
     permission_category="port_forwards",
     permission_action="create",
 )
@@ -297,7 +312,7 @@ async def create_port_forward(
     - name (string): Name for the port forwarding rule
     - dst_port (string): Destination/external port (e.g., "80", "443", "22" or range "10000-10010")
     - fwd_port (string): Internal port to forward to (e.g., "80", "8080" or range "10000-10010")
-    - fwd_ip (string): Internal IP address to forward to
+    - fwd (string): Internal IP address to forward to. `fwd_ip` is accepted as an alias.
 
     Optional in the complete shape:
     - protocol (string): Network protocol - "tcp", "udp", or "tcp_udp" (default: "tcp_udp")
@@ -310,7 +325,7 @@ async def create_port_forward(
         "name": "Web Server",
         "dst_port": "80",
         "fwd_port": "8080",
-        "fwd_ip": "192.168.1.100",
+        "fwd": "192.168.1.100",
         "protocol": "tcp",
         "enabled": true
     }
@@ -332,13 +347,13 @@ async def create_port_forward(
         return {"success": False, "error": "Permission denied to create port forward."}
 
     # "ext_port"/"to_ip" exist only in the compact shape -- the controller shape
-    # spells them "dst_port"/"fwd_ip". Choosing the schema from those markers keeps
+    # spells them "dst_port"/"fwd". Choosing the schema from those markers keeps
     # a validation error attributable to the shape the caller actually sent.
     is_compact = "ext_port" in port_forward_data or "to_ip" in port_forward_data
 
     if is_compact:
         is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate(
-            "port_forward_simple", port_forward_data
+            "port_forward_simple", _coerce_ports(port_forward_data)
         )
         if not is_valid or validated_data is None:
             logger.warning(f"Invalid compact port forward data: {error_msg}")
@@ -349,23 +364,40 @@ async def create_port_forward(
             "name": rule_name,
             "dst_port": str(validated_data["ext_port"]),
             "fwd_port": str(validated_data.get("int_port", validated_data["ext_port"])),
-            "fwd_ip": validated_data["to_ip"],
-            "protocol": {
+            # The controller reads the destination as `fwd`. Sent as `fwd_ip` it
+            # is accepted with rc=ok and dropped, leaving a rule that forwards
+            # nowhere.
+            "fwd": validated_data["to_ip"],
+            # The controller reads `proto`, not `protocol`. A rule sent with
+            # `protocol` is accepted with rc=ok and stored with no protocol at
+            # all, which forwards nothing and reports success.
+            "proto": {
                 "tcp": "tcp",
                 "udp": "udp",
-                "both": "tcp_udp",
-            }.get(validated_data.get("protocol", "both"), "tcp_udp"),
+                "both": "tcp/udp",
+                "tcp_udp": "tcp/udp",
+            }.get(str(validated_data.get("protocol", "both")).lower(), "tcp/udp"),
             "enabled": validated_data.get("enabled", True),
         }
     else:
         # Validate the input
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward", port_forward_data)
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward", _coerce_ports(port_forward_data))
         if not is_valid or validated_data is None:
             logger.warning(f"Invalid port forward data: {error_msg}")
             return {"success": False, "error": error_msg or "Validation failed"}
 
         # Required fields check
-        required_fields = ["name", "dst_port", "fwd_port", "fwd_ip"]
+        # `fwd_ip` is the spelling callers and older payloads use; the controller
+        # only reads `fwd`, silently discarding the other.
+        if "fwd" not in validated_data and validated_data.get("fwd_ip"):
+            validated_data["fwd"] = validated_data["fwd_ip"]
+        if not validated_data.get("fwd"):
+            return {
+                "success": False,
+                "error": "A forwarding destination is required: pass 'fwd' (or its alias 'fwd_ip').",
+            }
+
+        required_fields = ["name", "dst_port", "fwd_port"]
         missing_fields = [field for field in required_fields if field not in validated_data]
         if missing_fields:
             error = f"Missing required fields: {', '.join(missing_fields)}"
@@ -378,8 +410,8 @@ async def create_port_forward(
             "name": rule_name,
             "dst_port": validated_data["dst_port"],
             "fwd_port": validated_data["fwd_port"],
-            "fwd_ip": validated_data["fwd_ip"],
-            "proto": validated_data.get("protocol", "tcp_udp").replace("_", "/"),  # Manager expects 'tcp/udp'
+            "fwd": validated_data.get("fwd") or validated_data.get("fwd_ip"),
+            "proto": str(validated_data.get("protocol", "tcp_udp")).replace("_", "/"),
             "protocol_match_excepted": False,
             "enabled": validated_data.get("enabled", True),
             "log": validated_data.get("log", False),
@@ -401,7 +433,7 @@ async def create_port_forward(
 
         logger.info(
             f"Attempting to create port forward: {rule_name} "
-            f"({rule_data.get('proto', rule_data.get('protocol'))} {rule_data['dst_port']} -> {rule_data['fwd_ip']}:{rule_data['fwd_port']})"
+            f"({rule_data.get('proto')} {rule_data['dst_port']} -> {rule_data.get('fwd')}:{rule_data['fwd_port']})"
         )
 
         result = await firewall_manager.create_port_forward(rule_data, site=site_slug)
@@ -459,7 +491,7 @@ async def update_port_forward(
             - name (string): New name for the rule.
             - dst_port (string): New destination/external port or range.
             - fwd_port (string): New internal port or range.
-            - fwd_ip (string): New internal IP address.
+            - fwd (string): New internal IP address. `fwd_ip` is accepted as an alias.
             - protocol (string): New protocol ("tcp", "udp", or "tcp_udp").
             - enabled (boolean): New enabled state (True/False).
             - src_ip (string): New source IP/CIDR match (use empty string "" or null to remove).
@@ -504,7 +536,7 @@ async def update_port_forward(
         return {"success": False, "error": "update_data dictionary cannot be empty"}
 
     # Validate the update data against the update schema
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward_update", update_data)
+    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("port_forward_update", _coerce_ports(update_data))
     if not is_valid:
         logger.warning(f"Invalid port forward update data for ID {port_forward_id}: {error_msg}")
         return {"success": False, "error": f"Invalid update data: {error_msg}"}

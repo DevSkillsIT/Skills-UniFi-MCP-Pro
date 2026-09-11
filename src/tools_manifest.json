@@ -339,7 +339,7 @@
       }
     },
     {
-      "description": "Port forwarding e NAT no UniFi Network \u2014 cria\u00e7\u00e3o de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd_ip), detectada automaticamente pelo formato enviado. Use quando precisar expor servi\u00e7o interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
+      "description": "Port forwarding e NAT no UniFi Network \u2014 cria\u00e7\u00e3o de redirecionamento por forma compacta (ext_port, to_ip) ou por payload completo da API (dst_port, fwd_port, fwd), detectada automaticamente pelo formato enviado. Use quando precisar expor servi\u00e7o interno na WAN, publicar porta ou mapear NAT. Retorna preview com confirm=false e a regra criada no UniFi com confirm=true.",
       "name": "unifi_create_port_forward",
       "schema": {
         "input": {

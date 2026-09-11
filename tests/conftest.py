@@ -2,7 +2,6 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
 import pytest
 
 # Add the project root to Python path
@@ -12,33 +11,26 @@ sys.path.insert(0, str(project_root))
 
 @pytest.fixture(autouse=True)
 def mock_runtime_dependencies():
-    """Stub only the MCP server layer, never the configuration layer.
+    """No longer stubs anything, and is kept so existing tests still request it.
 
-    `omegaconf` used to be replaced with a MagicMock and then deleted from
-    `sys.modules` on teardown. Any module imported while the mock was installed
-    kept a reference to it, so a later real `OmegaConf` call raised
-    `ConfigTypeError: isinstance() arg 2 must be a type`. The failure surfaced
-    only when two test modules ran together, which made it look like a defect in
-    whichever module happened to import a tool first.
+    Both stubs this fixture used to install did more harm than the isolation
+    they bought.
 
-    The real configuration loader works under test -- it reads
-    `src/config/config.yaml` -- so there is nothing to gain by faking it.
+    `omegaconf` was replaced with a MagicMock and then deleted from
+    `sys.modules` on teardown, so anything imported while the mock was in place
+    kept a reference to it and a later real `OmegaConf` call raised
+    `ConfigTypeError`. The failure only showed when two test modules ran
+    together, which made it look like a defect in whichever module imported a
+    tool first.
+
+    `mcp` was replaced too, which made `server.tool` a MagicMock -- and since
+    that decorator returns the function it wraps, every tool in `src/tools`
+    became a MagicMock rather than a coroutine. A test could then neither call a
+    tool nor read its signature, which is why so many of them were written as
+    `assert True`.
+
+    Both the real configuration loader and the real FastMCP server work under
+    test: the loader reads `src/config/config.yaml`, and constructing a server
+    opens no socket.
     """
-    import sys
-
-    mock_mcp = MagicMock()
-    mock_fastmcp = MagicMock()
-    mock_mcp.server.fastmcp.FastMCP = MagicMock
-    saved = {name: sys.modules.get(name) for name in ("mcp", "mcp.server", "mcp.server.fastmcp")}
-
-    sys.modules["mcp"] = mock_mcp
-    sys.modules["mcp.server"] = MagicMock()
-    sys.modules["mcp.server.fastmcp"] = mock_fastmcp
-
     yield
-
-    for name, module in saved.items():
-        if module is None:
-            sys.modules.pop(name, None)
-        else:
-            sys.modules[name] = module
