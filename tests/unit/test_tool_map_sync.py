@@ -97,11 +97,14 @@ class TestToolMapSync:
         assert len(tool_map) >= 50, f"Dynamic discovery only found {len(tool_map)} tools, expected 50+"
 
         # Should find some known tools
+        # Includes a tool whose name carries no "unifi_" prefix: discovery must
+        # find tools by what the decorator registers, not by a name pattern.
         known_tools = [
             "unifi_list_clients",
             "unifi_list_devices",
-            "unifi_get_top_clients",
+            "unifi_get_ap_stats",
             "unifi_list_firewall_policies",
+            "list_sites",
         ]
 
         for tool in known_tools:

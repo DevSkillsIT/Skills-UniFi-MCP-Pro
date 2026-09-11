@@ -121,9 +121,14 @@ def get_tool_index() -> Dict[str, Any]:
         # If bootstrap doesn't exist, fall through to normal mode
         pass
 
-    # Fallback: return registered tools (for eager/meta_only or if manifest missing)
-    tools = [
-        {
+    # The registry holds every tool the code defines, including ones the
+    # permissions configuration kept from being registered with the server.
+    # Advertising those as available would promise a call that fails, so each
+    # entry says whether it is callable and the counts are reported separately.
+    callable_names = _callable_tool_names()
+    tools = []
+    for meta in TOOL_REGISTRY.values():
+        entry = {
             "name": meta.name,
             "description": meta.description,
             "schema": {
@@ -131,13 +136,25 @@ def get_tool_index() -> Dict[str, Any]:
                 **({"output": meta.output_schema} if meta.output_schema else {}),
             },
         }
-        for meta in TOOL_REGISTRY.values()
-    ]
+        if callable_names is not None:
+            entry["callable"] = meta.name in callable_names
+        tools.append(entry)
 
-    return {
-        "tools": tools,
-        "count": len(tools),
-    }
+    result = {"tools": tools, "count": len(tools)}
+    if callable_names is not None:
+        result["callable_count"] = sum(1 for t in tools if t.get("callable"))
+        result["blocked_by_permissions"] = [t["name"] for t in tools if not t.get("callable")]
+    return result
+
+
+def _callable_tool_names() -> set[str] | None:
+    """Names the server will actually accept, or None when it cannot be read."""
+    try:
+        from src.runtime import server
+
+        return set(server._tool_manager._tools.keys())
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

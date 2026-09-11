@@ -11,10 +11,9 @@ Tools being tested:
 """
 
 import pytest
-import asyncio
 import sys
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from typing import Any, Dict, List
+from unittest.mock import AsyncMock, patch
+from typing import Any, Dict
 from pathlib import Path
 
 # Add the project root to path
@@ -25,7 +24,6 @@ if str(project_root) not in sys.path:
 from src.exceptions import (
     SiteNotFoundError,
     SiteForbiddenError,
-    InvalidSiteParameterError,
 )
 
 

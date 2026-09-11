@@ -10,11 +10,15 @@ from .schemas import (
     PORT_FORWARD_SCHEMA,
     PORT_FORWARD_SIMPLE_SCHEMA,
     PORT_FORWARD_UPDATE_SCHEMA,
+    QOS_RULE_SCHEMA,
     QOS_RULE_SIMPLE_SCHEMA,
+    QOS_RULE_UPDATE_SCHEMA,
     TRAFFIC_ROUTE_SCHEMA,
     TRAFFIC_ROUTE_SIMPLE_SCHEMA,
     TRAFFIC_ROUTE_UPDATE_SCHEMA,
     VPN_PROFILE_SCHEMA,
+    USERGROUP_SCHEMA,
+    USERGROUP_UPDATE_SCHEMA,
     WLAN_SCHEMA,
     WLAN_UPDATE_SCHEMA,
 )
@@ -36,6 +40,16 @@ class UniFiValidatorRegistry:
         "traffic_route_update": ResourceValidator(TRAFFIC_ROUTE_UPDATE_SCHEMA, "Traffic Route Update"),
         "wlan_update": ResourceValidator(WLAN_UPDATE_SCHEMA, "Wireless Network Update"),
         "network_update": ResourceValidator(NETWORK_UPDATE_SCHEMA, "Network Update"),
+        # Every key a tool passes to validate() must be registered here. An
+        # unregistered key does not fall through to "no validation" -- validate()
+        # returns a failure, so the tool refuses its own input and never reaches
+        # the manager. The schemas below already existed; only the registration
+        # was missing, so these tools could not run at all.
+        "qos_rule": ResourceValidator(QOS_RULE_SCHEMA, "QoS Rule"),
+        "qos_rule_update": ResourceValidator(QOS_RULE_UPDATE_SCHEMA, "QoS Rule Update"),
+        "traffic_route_create": ResourceValidator(TRAFFIC_ROUTE_SCHEMA, "Traffic Route Create"),
+        "usergroup_create": ResourceValidator(USERGROUP_SCHEMA, "User Group Create"),
+        "usergroup_update": ResourceValidator(USERGROUP_UPDATE_SCHEMA, "User Group Update"),
         "firewall_policy_update": ResourceValidator(FIREWALL_POLICY_UPDATE_SCHEMA, "Firewall Policy Update"),
         "firewall_policy_simple": ResourceValidator(FIREWALL_POLICY_SIMPLE_SCHEMA, "Simple Firewall Policy"),
         "traffic_route_simple": ResourceValidator(TRAFFIC_ROUTE_SIMPLE_SCHEMA, "Simple Traffic Route"),

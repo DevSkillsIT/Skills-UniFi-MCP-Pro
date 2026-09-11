@@ -14,20 +14,29 @@ import os
 from typing import Any, Dict, List, Optional
 
 
-def should_auto_confirm() -> bool:
-    """Check if auto-confirm is enabled via environment variable.
+# Operations whose effect is immediate and visible to users of the network, and
+# which no later call can undo. Auto-confirm does not cover these: an agent that
+# merely wanted to see what a reboot would do must not cause one.
+ALWAYS_CONFIRM_ACTIONS = frozenset({"reboot", "restart", "upgrade", "adopt", "restore"})
 
-    When UNIFI_AUTO_CONFIRM=true, tools should skip the preview step
-    and execute operations directly, as if confirm=true was passed.
 
-    This is useful for:
-    - Workflow automation tools (n8n, Make, Zapier)
-    - Scripted/batch operations
-    - Environments where confirmation adds unnecessary friction
+def should_auto_confirm(action: Optional[str] = None) -> bool:
+    """Whether the preview step may be skipped for `action`.
+
+    UNIFI_AUTO_CONFIRM=true exists so workflow automation (n8n, Make, Zapier)
+    is not forced through a two-step confirmation. It applies to reversible
+    changes only.
+
+    Args:
+        action: The operation about to run. When it is one of
+            ALWAYS_CONFIRM_ACTIONS, the answer is False no matter what the
+            environment says, and the caller must pass confirm=True explicitly.
 
     Returns:
-        True if auto-confirm is enabled, False otherwise.
+        True when the preview may be skipped.
     """
+    if action and action.lower() in ALWAYS_CONFIRM_ACTIONS:
+        return False
     return os.getenv("UNIFI_AUTO_CONFIRM", "").lower() in ("true", "1", "yes")
 
 
@@ -215,4 +224,36 @@ def create_preview(
     if warnings:
         response["warnings"] = warnings
 
+    return response
+
+def action_preview(
+    action: str,
+    target: str,
+    site: Optional[str] = None,
+    consequences: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """Preview for an operation that acts on an existing thing.
+
+    Args:
+        action: The verb, e.g. "reboot" or "adopt".
+        target: What it acts on, named the way an operator would recognise it.
+        site: The site the action would run against; shown because acting on the
+            wrong site is the mistake this preview exists to prevent.
+        consequences: What the operator should weigh before confirming.
+
+    Returns:
+        Preview response for the action.
+    """
+    response: Dict[str, Any] = {
+        "success": False,
+        "requires_confirmation": True,
+        "action": action,
+        "preview": {"will_act_on": target},
+        "message": f"Will {action} {target}. Set confirm=true to execute.",
+    }
+    if site:
+        response["preview"]["site"] = site
+        response["message"] = f"Will {action} {target} on site '{site}'. Set confirm=true to execute."
+    if consequences:
+        response["consequences"] = consequences
     return response

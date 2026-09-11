@@ -69,11 +69,12 @@ class TestEventManager:
 
     @pytest.mark.asyncio
     async def test_get_events_handles_dict_response(self, event_manager, mock_connection):
-        """Test get_events handles dict response with 'data' key."""
-        mock_connection.request.return_value = {
-            "data": [{"_id": "evt1"}],
-            "meta": {"rc": "ok"},
-        }
+        """Test get_events wraps a single object answer in a list.
+
+        ConnectionManager.request already unwraps the {"meta", "data"} envelope,
+        so a dict reaching the manager is one event, not an envelope.
+        """
+        mock_connection.request.return_value = {"_id": "evt1"}
 
         events = await event_manager.get_events()
 
@@ -84,6 +85,49 @@ class TestEventManager:
     async def test_get_events_handles_error(self, event_manager, mock_connection):
         """Test get_events returns empty list on error."""
         mock_connection.request.side_effect = Exception("Network error")
+
+        events = await event_manager.get_events()
+
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_get_events_reports_missing_endpoint(self, event_manager, mock_connection):
+        """Test a 404 on /stat/event is reported, never read as 'no events'."""
+        from aiounifi.errors import ResponseError
+
+        from src.managers.event_manager import EndpointNotServedError
+
+        mock_connection.request.side_effect = ResponseError(
+            "Call https://host/api/s/default/stat/event received 404 Not Found"
+        )
+
+        with pytest.raises(EndpointNotServedError) as excinfo:
+            await event_manager.get_events()
+
+        assert excinfo.value.error_code == "ENDPOINT_NOT_SERVED"
+        assert excinfo.value.details["path"] == "/stat/event"
+        assert excinfo.value.details["controller_status"] == 404
+
+    @pytest.mark.asyncio
+    async def test_get_alarms_reports_missing_endpoint(self, event_manager, mock_connection):
+        """Test a 404 on /stat/alarm is reported, never read as 'no alarms'."""
+        from aiounifi.errors import ResponseError
+
+        from src.managers.event_manager import EndpointNotServedError
+
+        mock_connection.request.side_effect = ResponseError(
+            "Call https://host/api/s/default/stat/alarm received 404 Not Found"
+        )
+
+        with pytest.raises(EndpointNotServedError):
+            await event_manager.get_alarms()
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_is_not_a_missing_endpoint(self, event_manager, mock_connection):
+        """Test a 429 shares the exception type but is not an absent endpoint."""
+        from aiounifi.errors import ResponseError
+
+        mock_connection.request.side_effect = ResponseError("Call https://host received 429: b''")
 
         events = await event_manager.get_events()
 
@@ -154,6 +198,19 @@ class TestEventManager:
         result = await event_manager.archive_alarm("alarm123")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_archive_alarm_refused_by_controller(self, event_manager, mock_connection):
+        """Test a controller refusal is a failure, not a silent success."""
+        mock_connection.request.return_value = {
+            "meta": {"rc": "error", "msg": "api.err.NoPermission"},
+            "data": [],
+        }
+
+        result = await event_manager.archive_alarm("alarm123")
+
+        assert result is False
+        assert mock_connection.request.call_args.kwargs["return_raw"] is True
 
     @pytest.mark.asyncio
     async def test_archive_all_alarms_success(self, event_manager, mock_connection):

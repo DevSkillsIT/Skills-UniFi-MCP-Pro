@@ -7,7 +7,7 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from src.exceptions import (
     InvalidSiteParameterError,
@@ -15,12 +15,78 @@ from src.exceptions import (
     SiteNotFoundError,
 )
 from src.runtime import config, routing_manager, server, system_manager
-from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
+from src.utils.confirmation import create_preview, preview_response, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
 from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry
 
 logger = logging.getLogger(__name__)
+
+# The controller spells a route's fields with a hyphen ("static-route_network"),
+# while this tool's own preview labels them "network" and "gateway" -- a caller
+# who read the preview sends the friendly spelling back. Accepting both keeps a
+# destination or next-hop from being dropped on its way to the manager.
+_ROUTE_FIELD_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "name": ("name",),
+    "static_route_network": ("static-route_network", "static_route_network", "network", "destination"),
+    "static_route_nexthop": ("static-route_nexthop", "static_route_nexthop", "nexthop", "gateway"),
+    "static_route_distance": ("static-route_distance", "static_route_distance", "distance"),
+    "enabled": ("enabled",),
+    "route_type": ("type", "route_type"),
+}
+
+_ROUTE_REQUIRED = ("name", "static_route_network", "static_route_nexthop")
+
+# The field name the controller stores for each manager keyword. A preview that
+# proposes "network" against a route that stores "static-route_network" shows the
+# current value as empty for every field being changed.
+_ROUTE_API_FIELD = {
+    "name": "name",
+    "static_route_network": "static-route_network",
+    "static_route_nexthop": "static-route_nexthop",
+    "static_route_distance": "static-route_distance",
+    "enabled": "enabled",
+    "route_type": "type",
+}
+
+
+def _route_kwargs(data: Dict[str, Any], for_update: bool = False) -> Dict[str, Any]:
+    """Translate a caller's route dict into RoutingManager keyword arguments.
+
+    `for_update` drops "route_type": the update endpoint takes the merged route
+    object and the manager exposes no parameter for retyping an existing route.
+    """
+    kwargs: Dict[str, Any] = {}
+    for parameter, aliases in _ROUTE_FIELD_ALIASES.items():
+        if for_update and parameter == "route_type":
+            continue
+        for alias in aliases:
+            if alias in data:
+                kwargs[parameter] = data[alias]
+                break
+    return kwargs
+
+
+def _accepted_route_fields() -> str:
+    """Comma-separated list of every field spelling this tool understands."""
+    return ", ".join(sorted({alias for aliases in _ROUTE_FIELD_ALIASES.values() for alias in aliases}))
+
+
+def _validate_optional(
+    resource_type: str, data: Dict[str, Any]
+) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """Validate `data` only when a schema is registered for `resource_type`.
+
+    UniFiValidatorRegistry carries no entry for the routing resource types, and
+    an unregistered type answers "no validator found" -- a message that reads as
+    invalid input and rejects every create and update whatever the caller sends.
+    A missing schema is a gap in the registry, not a verdict on the request.
+    """
+    if UniFiValidatorRegistry.get_validator(resource_type) is None:
+        logger.warning(f"No validator registered for '{resource_type}'; forwarding the request unvalidated.")
+        return True, None, data
+    is_valid, error_msg, validated = UniFiValidatorRegistry.validate(resource_type, data)
+    return is_valid, error_msg, validated or {}
 
 
 @server.tool(
@@ -46,7 +112,7 @@ async def list_static_routes(site: Optional[str] = None) -> Dict[str, Any]:
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        routes = await routing_manager.get_static_routes(site=site_slug)
+        routes = await routing_manager.get_routes(site=site_slug)
 
         # Convert StaticRoute objects to plain dictionaries
         routes_raw = [r.raw if hasattr(r, "raw") else r for r in routes]
@@ -93,7 +159,7 @@ async def get_static_route_details(route_id: str, site: Optional[str] = None) ->
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        route = await routing_manager.get_static_route_details(route_id, site=site_slug)
+        route = await routing_manager.get_route_details(route_id, site=site_slug)
         if route:
             route_raw = route.raw if hasattr(route, "raw") else route
             return inject_site_metadata(
@@ -160,20 +226,33 @@ async def create_static_route(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the route data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("static_route_create", route_data)
+        is_valid, error_msg, validated_data = _validate_optional("static_route_create", route_data)
         if not is_valid:
             logger.warning(f"Invalid static route create data: {error_msg}")
             return {"success": False, "error": f"Invalid static route data: {error_msg}"}
 
+        # Resolved before the preview so a confirmation is never offered for a
+        # route the manager cannot build.
+        route_kwargs = _route_kwargs(validated_data)
+        missing = [field for field in _ROUTE_REQUIRED if field not in route_kwargs]
+        if missing:
+            return {
+                "success": False,
+                "error": (
+                    f"route_data is missing {', '.join(missing)}. "
+                    f"Accepted field names: {_accepted_route_fields()}"
+                ),
+            }
+
         if not confirm and not should_auto_confirm():
             return create_preview(
                 resource_type="static_route",
-                resource_name=validated_data.get("name", f"Route to {validated_data.get('network', 'Unknown')}"),
-                resource_data=validated_data,
+                resource_name=route_kwargs["name"],
+                resource_data={_ROUTE_API_FIELD[k]: v for k, v in route_kwargs.items()},
             )
 
         # Create the static route
-        result = await routing_manager.create_static_route(validated_data, site=site_slug)
+        result = await routing_manager.create_route(site=site_slug, **route_kwargs)
         if result:
             return inject_site_metadata(
                 {
@@ -243,13 +322,25 @@ async def update_static_route(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the update data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("static_route_update", update_data)
+        is_valid, error_msg, validated_data = _validate_optional("static_route_update", update_data)
         if not is_valid:
             logger.warning(f"Invalid static route update data for ID {route_id}: {error_msg}")
             return {"success": False, "error": f"Invalid update data: {error_msg}"}
 
+        # Resolved before the preview so the proposal is shown in the same field
+        # spelling the stored route uses.
+        route_kwargs = _route_kwargs(validated_data, for_update=True)
+        if not route_kwargs:
+            return {
+                "success": False,
+                "error": (
+                    "update_data carries no field this tool can apply. "
+                    f"Accepted field names: {_accepted_route_fields()}"
+                ),
+            }
+
         # Fetch current state for preview
-        current = await routing_manager.get_static_route_details(route_id, site=site_slug)
+        current = await routing_manager.get_route_details(route_id, site=site_slug)
         if not current:
             return {"success": False, "error": "Static route not found"}
 
@@ -257,21 +348,21 @@ async def update_static_route(
             return update_preview(
                 resource_type="static_route",
                 resource_id=route_id,
-                resource_name=current.get("name", f"Route to {current.get('network', 'Unknown')}"),
+                resource_name=current.get("name", f"Route to {current.get('static-route_network', 'Unknown')}"),
                 current_state=current,
-                updates=validated_data,
+                updates={_ROUTE_API_FIELD[k]: v for k, v in route_kwargs.items()},
             )
 
         # Perform the update
-        success = await routing_manager.update_static_route(route_id, validated_data, site=site_slug)
+        success = await routing_manager.update_route(route_id, site=site_slug, **route_kwargs)
         if success:
             # Fetch updated details
-            updated = await routing_manager.get_static_route_details(route_id, site=site_slug)
+            updated = await routing_manager.get_route_details(route_id, site=site_slug)
             return inject_site_metadata(
                 {
                     "success": True,
                     "route_id": route_id,
-                    "updated_fields": list(validated_data.keys()),
+                    "updated_fields": sorted(_ROUTE_API_FIELD[k] for k in route_kwargs),
                     "details": updated,
                 },
                 site_id,
@@ -331,21 +422,23 @@ async def delete_static_route(route_id: str, confirm: bool = False, site: Option
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Fetch current state for preview
-        current = await routing_manager.get_static_route_details(route_id, site=site_slug)
+        current = await routing_manager.get_route_details(route_id, site=site_slug)
         if not current:
             return {"success": False, "error": "Static route not found"}
 
         if not confirm and not should_auto_confirm():
-            return create_preview(
+            return preview_response(
+                action="delete",
                 resource_type="static_route",
                 resource_id=route_id,
-                resource_name=current.get("name", f"Route to {current.get('network', 'Unknown')}"),
-                resource_data=current,
+                resource_name=current.get("name", f"Route to {current.get('static-route_network', 'Unknown')}"),
+                current_state=current,
+                proposed_changes={"deleted": True},
                 warnings=["This will permanently delete the static route"],
             )
 
         # Delete the static route
-        success = await routing_manager.delete_static_route(route_id, site=site_slug)
+        success = await routing_manager.delete_route(route_id, site=site_slug)
         if success:
             return inject_site_metadata(
                 {
@@ -404,7 +497,7 @@ async def enable_static_route(route_id: str, site: Optional[str] = None) -> Dict
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        success = await routing_manager.enable_static_route(route_id, site=site_slug)
+        success = await routing_manager.enable_route(route_id, site=site_slug)
         if success:
             return inject_site_metadata(
                 {
@@ -463,7 +556,7 @@ async def disable_static_route(route_id: str, site: Optional[str] = None) -> Dic
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        success = await routing_manager.disable_static_route(route_id, site=site_slug)
+        success = await routing_manager.disable_route(route_id, site=site_slug)
         if success:
             return inject_site_metadata(
                 {

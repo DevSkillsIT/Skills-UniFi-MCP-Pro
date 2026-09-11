@@ -53,6 +53,9 @@ server:
   http:
     enabled: ${oc.env:UNIFI_MCP_HTTP_ENABLED,false}
     force: ${oc.env:UNIFI_MCP_HTTP_FORCE,false}
+    # Streamable HTTP endpoint path. SSE is no longer served: it is the
+    # deprecated MCP transport and clients on the current spec use this one.
+    path: ${oc.env:UNIFI_MCP_HTTP_PATH,/mcp}
   diagnostics:
     enabled: ${oc.env:UNIFI_MCP_DIAGNOSTICS,false}
     log_tool_args: ${oc.env:UNIFI_MCP_DIAG_LOG_TOOL_ARGS,true}
@@ -60,6 +63,11 @@ server:
     max_payload_chars: ${oc.env:UNIFI_MCP_DIAG_MAX_PAYLOAD,2000}
   
 permissions:
+
+  # Delete is refused unconditionally in parse_permission(), whatever this file
+  # says. Removing a network, WLAN or firewall rule through an LLM is not a
+  # reversible mistake, so the gate is in code rather than in configuration.
+
 
   default:
     create: true
@@ -86,23 +94,25 @@ permissions:
     update: true
 
   networks:
-    create: false  # Provisioning a new network can disrupt traffic
-    update: false  # Changing subnets, VLANs, DHCP ranges requires care
+    create: true   # Provisioning a new network can disrupt traffic
+    update: true   # Changing subnets, VLANs, DHCP ranges requires care
 
   wlans:
-    create: false
-    update: false
+    create: true
+    update: true
 
   devices:
-    create: false  # Adoption / provisioning – normally handled by controller, not tools
-    update: false  # Firmware upgrade, rename, etc.
+    create: true   # Adoption / provisioning
+    update: true   # Reboot, firmware upgrade, rename.
+                   # NOTE: with UNIFI_AUTO_CONFIRM=true, unifi_reboot_device executes
+                   # on the first call -- the preview step is skipped entirely.
 
   clients:
-    create: false  # Not applicable, but kept for symmetry
-    update: false  # Block/unblock, rename, reconnect
+    create: true   # Not applicable, but kept for symmetry
+    update: true   # Block/unblock, rename, reconnect, guest authorization, fixed IP
 
   vpn_servers:
-    create: false
+    create: true
     update: true
 
   events:
@@ -118,5 +128,5 @@ permissions:
     update: true   # Allow modifying bandwidth limits
 
   routes:
-    create: false  # Static routes can disrupt connectivity
-    update: false  # Modifying routes requires careful planning
+    create: true   # Static routes can disrupt connectivity
+    update: true   # Modifying routes requires careful planning

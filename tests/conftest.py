@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock
 import pytest
 
 # Add the project root to Python path
@@ -12,26 +12,33 @@ sys.path.insert(0, str(project_root))
 
 @pytest.fixture(autouse=True)
 def mock_runtime_dependencies():
-    """Mock MCP runtime dependencies before importing tools."""
-    import sys
-    from unittest.mock import MagicMock, AsyncMock
+    """Stub only the MCP server layer, never the configuration layer.
 
-    # Create mock for mcp module
+    `omegaconf` used to be replaced with a MagicMock and then deleted from
+    `sys.modules` on teardown. Any module imported while the mock was installed
+    kept a reference to it, so a later real `OmegaConf` call raised
+    `ConfigTypeError: isinstance() arg 2 must be a type`. The failure surfaced
+    only when two test modules ran together, which made it look like a defect in
+    whichever module happened to import a tool first.
+
+    The real configuration loader works under test -- it reads
+    `src/config/config.yaml` -- so there is nothing to gain by faking it.
+    """
+    import sys
+
     mock_mcp = MagicMock()
     mock_fastmcp = MagicMock()
     mock_mcp.server.fastmcp.FastMCP = MagicMock
-    sys.modules['mcp'] = mock_mcp
-    sys.modules['mcp.server'] = MagicMock()
-    sys.modules['mcp.server.fastmcp'] = mock_fastmcp
+    saved = {name: sys.modules.get(name) for name in ("mcp", "mcp.server", "mcp.server.fastmcp")}
 
-    # Mock OmegaConf
-    mock_omegaconf = MagicMock()
-    sys.modules['omegaconf'] = mock_omegaconf
+    sys.modules["mcp"] = mock_mcp
+    sys.modules["mcp.server"] = MagicMock()
+    sys.modules["mcp.server.fastmcp"] = mock_fastmcp
 
     yield
 
-    # Cleanup
-    if 'mcp' in sys.modules:
-        del sys.modules['mcp']
-    if 'omegaconf' in sys.modules:
-        del sys.modules['omegaconf']
+    for name, module in saved.items():
+        if module is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = module

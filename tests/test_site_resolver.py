@@ -5,9 +5,8 @@ Following RED-GREEN-REFACTOR TDD cycle.
 Fase 1: Site Resolver + unifi_list_sites (CRÍTICA)
 """
 
-import asyncio
 import pytest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 from src.utils.site_resolver import (
     resolve_site_identifier,
     validate_site_access,
@@ -39,9 +38,9 @@ class TestValidateSiteParameter:
         assert result == "default"
 
     def test_valid_site_parameter_uppercase(self):
-        """RED: Should normalize uppercase to lowercase."""
+        """Casing is preserved: the whitelist is matched case-sensitively."""
         result = validate_site_parameter("DEFAULT")
-        assert result == "default"
+        assert result == "DEFAULT"
 
     def test_valid_site_parameter_with_hyphen(self):
         """RED: Should accept hyphens."""
@@ -133,7 +132,7 @@ class TestResolveSiteIdentifier:
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock:
             mock.return_value = sites
 
-            result = await resolve_site_identifier("ram")
+            result = await resolve_site_identifier("bra")
 
             assert result["slug"] == "bravo"
 

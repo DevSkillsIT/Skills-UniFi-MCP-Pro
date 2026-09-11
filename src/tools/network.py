@@ -24,6 +24,19 @@ from src.validator_registry import UniFiValidatorRegistry
 logger = logging.getLogger(__name__)
 
 
+def _coerce_vlan(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept a VLAN id written as a numeric string.
+
+    The controller reports VLAN ids as numbers, and callers frequently send
+    them as strings. Coercing here keeps the schema honest about the stored
+    type while still accepting the common input.
+    """
+    vlan = payload.get("vlan")
+    if isinstance(vlan, str) and vlan.strip().isdigit():
+        return {**payload, "vlan": int(vlan.strip())}
+    return payload
+
+
 @server.tool(
     name="unifi_list_networks",
     description="Redes configuradas no controlador UniFi Network — VLANs, LANs, segmentos corporativos e configurações de rede para isolamento de tráfego, segmentação ou separação de departamentos. Use quando precisar listar networks, auditar VLANs ou revisar segmentação. Retorna lista completa de redes com nome, subnet, VLAN ID e gateway no controlador UniFi.",
@@ -150,7 +163,7 @@ async def update_network(
         SiteForbiddenError: Access to site denied by whitelist
         InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "network", "update"):
+    if not parse_permission(config.permissions, "networks", "update"):
         logger.warning(f"Permission denied for updating network ({network_id}).")
         return {"success": False, "error": "Permission denied to update network."}
 
@@ -164,7 +177,7 @@ async def update_network(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the update data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_update", update_data)
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_update", _coerce_vlan(update_data))
         if not is_valid:
             logger.warning(f"Invalid network update data for ID {network_id}: {error_msg}")
             return {"success": False, "error": f"Invalid update data: {error_msg}"}
@@ -252,7 +265,7 @@ async def create_network(
         SiteForbiddenError: Access to site denied by whitelist
         InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "network", "create"):
+    if not parse_permission(config.permissions, "networks", "create"):
         logger.warning("Permission denied for creating network.")
         return {"success": False, "error": "Permission denied to create network."}
 
@@ -264,7 +277,7 @@ async def create_network(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the network data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network_create", network_data)
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network", _coerce_vlan(network_data))
         if not is_valid:
             logger.warning(f"Invalid network create data: {error_msg}")
             return {"success": False, "error": f"Invalid network data: {error_msg}"}
@@ -305,168 +318,26 @@ async def create_network(
     except Exception as e:
         logger.error(f"Error creating network: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-        # Validate the input
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("network", network_data)
-        if not is_valid:
-            logger.warning(f"Invalid network data: {error_msg}")
-            return {"success": False, "error": error_msg}
-
-        # Required fields check
-        required_fields = ["name", "purpose"]
-        missing_fields = [field for field in required_fields if field not in validated_data]
-        if missing_fields:
-            error = f"Missing required fields: {', '.join(missing_fields)}"
-            logger.warning(error)
-            return {"success": False, "error": error}
-
-        # Additional validation for purpose type
-        purpose = validated_data.get("purpose")
-        # Ensure purpose is one of the allowed values
-        allowed_purposes = [
-            "corporate",
-            "guest",
-            "wan",
-            "vlan-only",
-            "vpn-client",
-            "vpn-server",
-        ]  # Consider adding "bridge"? Check schema
-        if purpose not in allowed_purposes:
-            return {
-                "success": False,
-                "error": f"Invalid 'purpose': {purpose}. Must be one of {allowed_purposes}.",
-            }
-
-        # Validation based on purpose
-        if purpose != "vlan-only" and not validated_data.get("ip_subnet"):
-            return {
-                "success": False,
-                "error": f"'ip_subnet' is required for network purpose '{purpose}'",
-            }
-
-        if purpose == "vlan-only" and not validated_data.get("vlan"):
-            return {
-                "success": False,
-                "error": "'vlan' is required for network purpose 'vlan-only'.",
-            }
-
-        # Validation for DHCP
-        dhcp_enabled = validated_data.get("dhcp_enabled", True)
-        if (
-            purpose != "vlan-only"
-            and dhcp_enabled
-            and (not validated_data.get("dhcp_start") or not validated_data.get("dhcp_stop"))
-        ):
-            return {
-                "success": False,
-                "error": "'dhcp_start' and 'dhcp_stop' are required if dhcp_enabled is true (and purpose is not vlan-only).",
-            }
-
-        # Validation for VLAN
-        vlan_enabled = validated_data.get("vlan_enabled", False)
-        vlan_id = validated_data.get("vlan")
-        if vlan_enabled and not vlan_id:
-            return {
-                "success": False,
-                "error": "'vlan' is required when vlan_enabled is true",
-            }
-
-        if vlan_id is not None and (int(vlan_id) < 1 or int(vlan_id) > 4094):
-            return {"success": False, "error": "'vlan' must be between 1 and 4094."}
-
-        if not confirm and not should_auto_confirm():
-            return create_preview(
-                resource_type="network",
-                resource_data=validated_data,
-                resource_name=validated_data.get("name"),
-                warnings=["Creating a network may temporarily disrupt connectivity"],
-            )
-
-        logger.info(f"Attempting to create network '{validated_data['name']}' with purpose '{purpose}'")
-        try:
-            # Use validated data directly
-            network_data = validated_data
-            network_data.setdefault("enabled", True)
-
-            # Assume manager returns the created dict or None/False
-            created_network = await network_manager.create_network(network_data)
-            if created_network and created_network.get("_id"):
-                new_network_id = created_network.get("_id")
-                logger.info(f"Successfully created network '{validated_data['name']}' with ID {new_network_id}")
-                return {
-                    "success": True,
-                    "site": network_manager._connection.site,
-                    "message": f"Network '{validated_data['name']}' created successfully.",
-                    "network_id": new_network_id,
-                    "details": json.loads(json.dumps(created_network, default=str)),
-                }
-            else:
-                error_msg = (
-                    created_network.get("error", "Manager returned failure")
-                    if isinstance(created_network, dict)
-                    else "Manager returned non-dict or failure"
-                )
-                logger.error(f"Failed to create network '{validated_data['name']}'. Reason: {error_msg}")
-                return {
-                    "success": False,
-                    "error": f"Failed to create network '{validated_data['name']}'. {error_msg}",
-                }
-        except Exception as e:
-            logger.error(
-                f"Error creating network '{validated_data.get('name', 'unknown')}': {e}",
-                exc_info=True,
-            )
-            return {"success": False, "error": str(e)}
-    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
-        raise
-    finally:
-        if original_site is not None:
-            network_manager._connection.site = original_site
 
 
 @server.tool(
     name="unifi_list_wlans",
-    description="Redes wireless do controlador UniFi Network — SSIDs, WLANs e configurações de access points para conectividade WiFi, guest network ou redes corporativas sem fio. Use quando precisar listar WLANs, auditar SSIDs ou revisar wireless. Retorna lista completa de redes WiFi com nome, segurança, VLAN e banda no controlador UniFi.",
+    description="Redes wireless do site UniFi Network — SSIDs, WLANs e configurações de access points para conectividade WiFi, guest network ou redes corporativas sem fio. Use quando precisar listar WLANs, auditar SSIDs ou revisar wireless. Retorna nome, estado, segurança, rede associada e grupo de usuários de cada SSID do site indicado no controlador UniFi.",
 )
-async def list_wlans() -> Dict[str, Any]:
-    """Lists all WLANs (Wireless SSIDs) configured on the UniFi Network controller.
+async def list_wlans(site: Optional[str] = None) -> Dict[str, Any]:
+    """List the wireless SSIDs configured on the target site.
 
-    Returns:
-        A dictionary containing:
-        - success (bool): Indicates if the operation was successful.
-        - site (str): The identifier of the UniFi site queried.
-        - count (int): The number of WLANs found.
-        - wlans (List[Dict]): A list of WLANs, each containing summary info:
-            - id (str): The unique identifier (_id) of the WLAN.
-            - name (str): The SSID (name) of the WLAN.
-            - enabled (bool): Whether the WLAN is currently active.
-            - security (str): The security mode (e.g., 'wpapsk', 'open').
-            - network_id (str, optional): The ID of the network this WLAN is associated with.
-            - usergroup_id (str, optional): The ID of the user group associated with this WLAN.
-        - error (str, optional): An error message if the operation failed.
-
-    Example response (success):
-    {
-        "success": True,
-        "site": "default",
-        "count": 1,
-        "wlans": [
-            {
-                "id": "60c7d8e9f0a1b2c3d4e5f6a7",
-                "name": "MyWiFi",
-                "enabled": True,
-                "security": "wpapsk",
-                "network_id": "60a8b3c4d5e6f7a8b9c0d1e2",
-                "usergroup_id": "_default_"
-            }
-        ]
-    }
+    Args:
+        site: Site slug or display name. Without it the configured default site
+            is used, and the site actually queried is always reported back in
+            the response metadata.
     """
-    if not parse_permission(config.permissions, "wlan", "read"):
+    if not parse_permission(config.permissions, "wlans", "read"):
         logger.warning("Permission denied for listing WLANs.")
         return {"success": False, "error": "Permission denied to list WLANs."}
     try:
-        wlans = await network_manager.get_wlans()
-        # Ensure wlans are dictionaries
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        wlans = await network_manager.get_wlans(site=site_slug)
         wlans_raw = [w.raw if hasattr(w, "raw") else w for w in wlans]
         formatted_wlans = [
             {
@@ -474,17 +345,24 @@ async def list_wlans() -> Dict[str, Any]:
                 "name": w.get("name"),
                 "enabled": w.get("enabled"),
                 "security": w.get("security"),
-                "network_id": w.get("networkconf_id"),  # Map internal key
+                "network_id": w.get("networkconf_id"),
                 "usergroup_id": w.get("usergroup_id"),
+                "wlan_band": w.get("wlan_band"),
             }
             for w in wlans_raw
         ]
-        return {
-            "success": True,
-            "site": network_manager._connection.site,
-            "count": len(formatted_wlans),
-            "wlans": formatted_wlans,
-        }
+        return inject_site_metadata(
+            {
+                "success": True,
+                "count": len(formatted_wlans),
+                "wlans": formatted_wlans,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
     except Exception as e:
         logger.error(f"Error listing WLANs: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -492,58 +370,43 @@ async def list_wlans() -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_get_wlan_details",
-    description="Detalhes completos de rede wireless UniFi Network específica — informações de SSID, WLAN, segurança e configuração de access point identificados por ID único. Use quando precisar auditar WLAN específica, validar WiFi ou revisar autenticação. Retorna nome, encryption, password e VLAN do SSID no controlador UniFi.",
+    description="Detalhes completos de uma rede wireless UniFi Network — configuração integral do SSID identificado por ID, incluindo segurança, banda, VLAN associada e políticas. Use quando precisar auditar uma WLAN específica, validar a configuração WiFi ou revisar a autenticação. Retorna a configuração bruta do SSID no site indicado do controlador UniFi.",
 )
-async def get_wlan_details(wlan_id: str) -> Dict[str, Any]:
-    """Gets the detailed configuration of a specific WLAN (SSID) by its ID.
+async def get_wlan_details(wlan_id: str, site: Optional[str] = None) -> Dict[str, Any]:
+    """Read the full configuration of one SSID.
 
     Args:
-        wlan_id (str): The unique identifier (_id) of the WLAN.
-
-    Returns:
-        A dictionary containing:
-        - success (bool): Indicates if the operation was successful.
-        - site (str): The identifier of the UniFi site queried.
-        - wlan_id (str): The ID of the WLAN requested.
-        - details (Dict[str, Any]): A dictionary containing the raw configuration details
-          of the WLAN as returned by the UniFi controller.
-        - error (str, optional): An error message if the operation failed (e.g., WLAN not found).
-
-    Example response (success):
-    {
-        "success": True,
-        "site": "default",
-        "wlan_id": "60c7d8e9f0a1b2c3d4e5f6a7",
-        "details": {
-            "_id": "60c7d8e9f0a1b2c3d4e5f6a7",
-            "name": "MyWiFi",
-            "enabled": True,
-            "security": "wpapsk",
-            "x_passphrase": "secretpassword",
-            "hide_ssid": False,
-            "networkconf_id": "60a8b3c4d5e6f7a8b9c0d1e2",
-            "usergroup_id": "_default_",
-            "site_id": "...",
-            # ... other fields
-        }
-    }
+        wlan_id: The WLAN `_id`. IDs are site-scoped, so an ID from one site
+            will not resolve on another.
+        site: Site slug or display name.
     """
-    if not parse_permission(config.permissions, "wlan", "read"):
+    if not parse_permission(config.permissions, "wlans", "read"):
         logger.warning(f"Permission denied for getting WLAN details ({wlan_id}).")
         return {"success": False, "error": "Permission denied to get WLAN details."}
+    if not wlan_id:
+        return {"success": False, "error": "wlan_id is required"}
     try:
-        if not wlan_id:
-            return {"success": False, "error": "wlan_id is required"}
-        wlan = await network_manager.get_wlan_details(wlan_id)
-        if wlan:
-            return {
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        wlan = await network_manager.get_wlan_details(wlan_id, site=site_slug)
+        if not wlan:
+            return inject_site_metadata(
+                {"success": False, "error": f"WLAN '{wlan_id}' not found on this site."},
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
                 "success": True,
-                "site": network_manager._connection.site,
                 "wlan_id": wlan_id,
                 "details": json.loads(json.dumps(wlan, default=str)),
-            }
-        else:
-            return {"success": False, "error": f"WLAN with ID '{wlan_id}' not found."}
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
     except Exception as e:
         logger.error(f"Error getting WLAN details for {wlan_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -551,43 +414,24 @@ async def get_wlan_details(wlan_id: str) -> Dict[str, Any]:
 
 @server.tool(
     name="unifi_update_wlan",
-    description="Atualização de rede wireless UniFi Network via ID — modificação de nome, password, segurança, VLAN ou configuração de SSID com confirmação obrigatória. Use quando precisar ajustar WLAN, modificar WiFi ou alterar encryption. Executa update parcial de configuração wireless no controlador UniFi com suporte multi-site.",
+    description="Atualização de rede wireless UniFi Network via ID com confirmação obrigatória — modifica nome do SSID, senha, modo de segurança, estado de habilitação, VLAN associada ou grupo de usuários. Use quando precisar ajustar uma WLAN, trocar a senha do WiFi ou alterar a criptografia. Aplica a alteração no site indicado e relê a configuração gravada no controlador UniFi.",
     permission_category="wlans",
     permission_action="update",
 )
-async def update_wlan(wlan_id: str, update_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
-    """Updates specific fields of an existing WLAN (Wireless SSID).
-
-    Allows modifying properties like SSID name, security settings, password,
-    enabled state, network association, etc. Only provided fields are updated.
-    Requires confirmation.
+async def update_wlan(
+    wlan_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
+    """Update fields of an existing SSID.
 
     Args:
-        wlan_id (str): The unique identifier (_id) of the WLAN to update.
-        update_data (Dict[str, Any]): Dictionary of fields to update.
-            Allowed fields (all optional):
-            - name (string): New SSID name.
-            - security (string): New security mode ("open", "wpapsk", "wpa2-psk", etc.).
-            - x_passphrase (string): New password (required if security is not "open").
-            - enabled (boolean): New enabled state.
-            - hide_ssid (boolean): New SSID hiding state.
-            - guest_policy (boolean): Make this a guest network.
-            - usergroup_id (string): New user group ID.
-            - networkconf_id (string): New network configuration ID (associates WLAN with network).
-            # Add other relevant fields from WLANSchema if needed
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
-
-    Returns:
-        Dict: Success status, ID, updated fields, details, or error message.
-        Example (success):
-        {
-            "success": True,
-            "wlan_id": "60c7d8e9f0a1b2c3d4e5f6a7",
-            "updated_fields": ["name", "enabled", "x_passphrase"],
-            "details": { ... updated WLAN details ... }
-        }
+        wlan_id: The WLAN `_id` on the target site.
+        update_data: Fields to change. The controller replaces the whole object
+            on write, so the manager merges these onto the current definition.
+        confirm: Must be True to apply; otherwise a preview is returned.
+        site: Site slug or display name. This is a write: passing the wrong
+            site changes the wrong network, so it is resolved and reported.
     """
-    if not parse_permission(config.permissions, "wlan", "update"):
+    if not parse_permission(config.permissions, "wlans", "update"):
         logger.warning(f"Permission denied for updating WLAN ({wlan_id}).")
         return {"success": False, "error": "Permission denied to update WLAN."}
 
@@ -596,65 +440,66 @@ async def update_wlan(wlan_id: str, update_data: Dict[str, Any], confirm: bool =
     if not update_data:
         return {"success": False, "error": "update_data cannot be empty"}
 
-    # Validate the update data
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("wlan_update", update_data)
-    if not is_valid:
-        logger.warning(f"Invalid WLAN update data for ID {wlan_id}: {error_msg}")
-        return {"success": False, "error": f"Invalid update data: {error_msg}"}
-
-    if not validated_data:
-        logger.warning(f"WLAN update data for ID {wlan_id} is empty after validation.")
-        return {
-            "success": False,
-            "error": "Update data is effectively empty or invalid.",
-        }
-
-    # Fetch current state for preview
-    current = await network_manager.get_wlan_details(wlan_id)
-    if not current:
-        return {"success": False, "error": "WLAN not found"}
-
-    if not confirm and not should_auto_confirm():
-        return update_preview(
-            resource_type="wlan",
-            resource_id=wlan_id,
-            resource_name=current.get("name"),
-            current_state=current,
-            updates=validated_data,
-        )
-
-    # Basic cross-field validation for password
-    if "security" in validated_data and validated_data["security"] != "open" and "x_passphrase" not in validated_data:
-        # Check existing state? Or require passphrase if changing security?
-        pass  # Let manager handle merge/API requirements
-
-    updated_fields_list = list(validated_data.keys())
-    logger.info(f"Attempting to update WLAN '{wlan_id}' with fields: {', '.join(updated_fields_list)}")
     try:
-        # *** Assumption: Need network_manager.update_wlan(wlan_id, validated_data) ***
-        # This method needs implementation in NetworkManager.
-        success = await network_manager.update_wlan(wlan_id, validated_data)
-        error_message_detail = "Manager method update_wlan might not be fully implemented for partial updates."
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        if success:
-            updated_wlan = await network_manager.get_wlan_details(wlan_id)
-            logger.info(f"Successfully updated WLAN ({wlan_id})")
-            return {
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("wlan_update", update_data)
+        if not is_valid:
+            logger.warning(f"Invalid WLAN update data for ID {wlan_id}: {error_msg}")
+            return {"success": False, "error": f"Invalid update data: {error_msg}"}
+        if not validated_data:
+            return {"success": False, "error": "Update data is effectively empty or invalid."}
+
+        current = await network_manager.get_wlan_details(wlan_id, site=site_slug)
+        if not current:
+            return inject_site_metadata(
+                {"success": False, "error": f"WLAN '{wlan_id}' not found on this site."},
+                site_id,
+                site_name,
+                site_slug,
+            )
+
+        if not confirm and not should_auto_confirm():
+            return update_preview(
+                resource_type="wlan",
+                resource_id=wlan_id,
+                resource_name=f"{current.get('name')} ({site_name or site_slug})",
+                current_state=current,
+                updates=validated_data,
+            )
+
+        updated_fields_list = list(validated_data.keys())
+        logger.info(f"Updating WLAN '{wlan_id}' on site {site_slug}: {', '.join(updated_fields_list)}")
+        success = await network_manager.update_wlan(wlan_id, validated_data, site=site_slug)
+
+        if not success:
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "wlan_id": wlan_id,
+                    "error": f"Controller refused the update of WLAN '{wlan_id}'. See server logs for the controller message.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+
+        # Read back rather than echo the request: the controller is the authority
+        # on what was actually stored.
+        updated_wlan = await network_manager.get_wlan_details(wlan_id, site=site_slug)
+        return inject_site_metadata(
+            {
                 "success": True,
                 "wlan_id": wlan_id,
                 "updated_fields": updated_fields_list,
                 "details": json.loads(json.dumps(updated_wlan, default=str)),
-            }
-        else:
-            logger.error(f"Failed to update WLAN ({wlan_id}). {error_message_detail}")
-            wlan_after_update = await network_manager.get_wlan_details(wlan_id)
-            return {
-                "success": False,
-                "wlan_id": wlan_id,
-                "error": f"Failed to update WLAN ({wlan_id}). Check server logs. {error_message_detail}",
-                "details_after_attempt": json.loads(json.dumps(wlan_after_update, default=str)),
-            }
-
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
     except Exception as e:
         logger.error(f"Error updating WLAN {wlan_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -662,115 +507,82 @@ async def update_wlan(wlan_id: str, update_data: Dict[str, Any], confirm: bool =
 
 @server.tool(
     name="unifi_create_wlan",
-    description="Criação de rede wireless UniFi Network com validação — novo SSID, WLAN, guest network ou configuração WiFi corporativa com confirmação obrigatória. Use quando precisar adicionar WLAN, configurar WiFi ou implementar guest access. Cria rede wireless validada no controlador UniFi com suporte multi-site.",
+    description="Criação de rede wireless UniFi Network com validação e confirmação obrigatória — novo SSID corporativo, de visitantes ou de dispositivos, com modo de segurança, senha, VLAN associada e grupo de usuários. Use quando precisar adicionar uma WLAN, configurar WiFi novo ou implementar acesso de visitantes. Cria o SSID no site indicado do controlador UniFi.",
     permission_category="wlans",
     permission_action="create",
 )
-async def create_wlan(wlan_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
-    """Create a new WLAN (SSID) with comprehensive validation.
+async def create_wlan(
+    wlan_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
+    """Create a new SSID on the target site.
 
     Args:
-        wlan_data (Dict[str, Any]): WLAN configuration data
-        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
-
-    Required parameters in wlan_data:
-    - name (string): Name of the wireless network (SSID)
-    - security (string): Security protocol ("open", "wpa-psk", "wpa2-psk", etc.)
-
-    If security is not "open":
-    - x_passphrase (string): Password for the wireless network
-
-    Optional parameters in wlan_data:
-    - enabled (boolean): Whether the network is enabled (default: true)
-    - hide_ssid (boolean): Whether to hide the SSID (default: false)
-    - guest_policy (boolean): Whether this is a guest network (default: false)
-    - usergroup_id (string): User group ID (default: default group)
-    - networkconf_id (string): Network configuration ID to associate with (default: default LAN)
-
-    Example:
-    {
-        "name": "GuestWiFi",
-        "security": "open",
-        "enabled": true,
-        "guest_policy": true,
-        "networkconf_id": "60a8b3c4d5e6f7a8b9c0d1e4" # Associate with guest network
-    }
-
-    Returns:
-    - success (boolean): Whether the operation succeeded
-    - wlan_id (string): ID of the created WLAN if successful
-    - details (object): Details of the created WLAN
-    - error (string): Error message if unsuccessful
+        wlan_data: WLAN configuration. `name` and `security` are required, plus
+            `x_passphrase` for any security mode other than `open`.
+        confirm: Must be True to apply; otherwise a preview is returned.
+        site: Site slug or display name. This is a write: passing the wrong
+            site creates the SSID on the wrong network, so it is resolved and
+            reported.
     """
-    if not parse_permission(config.permissions, "wlan", "create"):
+    if not parse_permission(config.permissions, "wlans", "create"):
         logger.warning("Permission denied for creating WLAN.")
         return {"success": False, "error": "Permission denied to create WLAN."}
 
-    # Moved imports
-    from src.validator_registry import UniFiValidatorRegistry
-
-    # Validate the input
-    is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("wlan", wlan_data)
-    if not is_valid:
-        logger.warning(f"Invalid WLAN data: {error_msg}")
-        return {"success": False, "error": error_msg}
-
-    # Required fields check
-    required_fields = ["name", "security"]
-    missing_fields = [field for field in required_fields if field not in validated_data]
-    if missing_fields:
-        error = f"Missing required fields: {', '.join(missing_fields)}"
-        logger.warning(error)
-        return {"success": False, "error": error}
-
-    # Check passphrase requirement
-    if validated_data.get("security") != "open" and not validated_data.get("x_passphrase"):
-        return {
-            "success": False,
-            "error": "'x_passphrase' is required when security is not 'open'",
-        }
-
-    if not confirm and not should_auto_confirm():
-        return create_preview(
-            resource_type="wlan",
-            resource_data=validated_data,
-            resource_name=validated_data.get("name"),
-            warnings=["Creating a WLAN may temporarily affect wireless connectivity"],
-        )
-
-    logger.info(f"Attempting to create WLAN '{validated_data['name']}' with security '{validated_data['security']}'")
     try:
-        # Pass validated data directly to manager
-        wlan_payload = validated_data
-        wlan_payload.setdefault("enabled", True)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        created_wlan = await network_manager.create_wlan(wlan_payload)
+        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("wlan", wlan_data)
+        if not is_valid:
+            logger.warning(f"Invalid WLAN data: {error_msg}")
+            return {"success": False, "error": error_msg}
 
-        if created_wlan and created_wlan.get("_id"):
-            new_wlan_id = created_wlan.get("_id")
-            logger.info(f"Successfully created WLAN '{validated_data['name']}' with ID {new_wlan_id}")
-            return {
-                "success": True,
-                "site": network_manager._connection.site,
-                "message": f"WLAN '{validated_data['name']}' created successfully.",
-                "wlan_id": new_wlan_id,
-                "details": json.loads(json.dumps(created_wlan, default=str)),
-            }
-        else:
-            error_msg = (
-                created_wlan.get("error", "Manager returned failure")
-                if isinstance(created_wlan, dict)
-                else "Manager returned non-dict or failure"
-            )
-            logger.error(f"Failed to create WLAN '{validated_data['name']}'. Reason: {error_msg}")
+        missing_fields = [f for f in ("name", "security") if f not in validated_data]
+        if missing_fields:
+            return {"success": False, "error": f"Missing required fields: {', '.join(missing_fields)}"}
+
+        if validated_data.get("security") != "open" and not validated_data.get("x_passphrase"):
             return {
                 "success": False,
-                "error": f"Failed to create WLAN '{validated_data['name']}'. {error_msg}",
+                "error": "'x_passphrase' is required when security is not 'open'",
             }
 
-    except Exception as e:
-        logger.error(
-            f"Error creating WLAN '{validated_data.get('name', 'unknown')}': {e}",
-            exc_info=True,
+        if not confirm and not should_auto_confirm():
+            return create_preview(
+                resource_type="wlan",
+                resource_data=validated_data,
+                resource_name=f"{validated_data.get('name')} ({site_name or site_slug})",
+                warnings=["Creating a WLAN may temporarily affect wireless connectivity on this site"],
+            )
+
+        payload = dict(validated_data)
+        payload.setdefault("enabled", True)
+        logger.info(f"Creating WLAN '{payload['name']}' on site {site_slug}")
+        created_wlan = await network_manager.create_wlan(payload, site=site_slug)
+
+        if not created_wlan or not created_wlan.get("_id"):
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "error": f"Controller refused the creation of WLAN '{payload['name']}'. See server logs for the controller message.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+
+        return inject_site_metadata(
+            {
+                "success": True,
+                "message": f"WLAN '{payload['name']}' created successfully.",
+                "wlan_id": created_wlan.get("_id"),
+                "details": json.loads(json.dumps(created_wlan, default=str)),
+            },
+            site_id,
+            site_name,
+            site_slug,
         )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
+    except Exception as e:
+        logger.error(f"Error creating WLAN: {e}", exc_info=True)
         return {"success": False, "error": str(e)}

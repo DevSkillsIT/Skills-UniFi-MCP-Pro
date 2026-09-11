@@ -1,47 +1,59 @@
-"""
-Unifi Network MCP configuration tools.
+"""Unifi Network MCP configuration tools.
 
-This module provides MCP tools to manage configuration for a Unifi Network Controller.
+Registration happens at import time through the `@server.tool` decorator, the
+same as every other tool module. The previous version wrapped its tool in a
+`register_config_tools()` function that nothing ever called, so the tool was
+never registered -- and the body it would have registered returned a hardcoded
+placeholder under `success: true`.
 """
 
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from mcp.server import Server
-
-from src.managers.system_manager import SystemManager
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
+from src.runtime import server, system_manager
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
 
-def register_config_tools(server: Server, system_manager: SystemManager, permissions: Dict[str, bool]) -> None:
-    """Register configuration tools with the MCP server.
+@server.tool(
+    name="unifi_get_site_settings",
+    description="Configurações gerais do site UniFi Network — código de país, fuso horário, parâmetros de monitoramento de conectividade e demais ajustes de nível de site. Use quando precisar consultar settings globais do site, verificar o fuso horário configurado ou auditar parâmetros de monitoramento. Retorna o objeto de configuração do site indicado no controlador UniFi.",
+)
+async def get_site_settings(site: Optional[str] = None) -> Dict[str, Any]:
+    """Read the site-level settings object.
 
     Args:
-        server: The MCP server instance
-        controller: The Unifi Network controller client or relevant Manager(s)
-        permissions: Dictionary of permission flags
+        site: Site slug or display name. Settings are per-site, so the site is
+            resolved and reported back in the response metadata.
     """
-
-    @server.tool(
-        name="unifi_get_site_settings",
-        description="Configurações do site UniFi Network atual — parâmetros de sistema, código de país, fuso horário e monitoramento de conectividade. Use quando precisar consultar settings globais, verificar timezone configurado ou auditar parâmetros de monitoramento. Retorna configurações ativas com valores e descrições no controlador UniFi.",
-        parameters={},
-    )
-    async def get_site_settings(ctx) -> Dict[str, Any]:
-        """Get current site settings."""
-        try:
-            settings = [{"setting": "placeholder", "value": "site_settings_not_implemented"}]
-            logger.warning("get_site_settings tool called, but depends on unimplemented manager method.")
-            return {"success": True, "settings": settings}
-        except AttributeError:
-            logger.error("Controller/Manager object lacks 'get_site_settings' method.")
-            return {
-                "success": False,
-                "error": "Required manager method 'get_site_settings' not found.",
-            }
-        except Exception as e:
-            logger.error(f"Error getting site settings: {e}", exc_info=True)
-            return {"success": False, "error": str(e)}
-
-    logger.info("Registered Unifi Configuration tools (Site Settings only).")
+    try:
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        settings = await system_manager.get_site_settings(site=site_slug)
+        if not settings or not settings.get("sections"):
+            return inject_site_metadata(
+                {"success": False, "error": "Controller returned no site settings."},
+                site_id,
+                site_name,
+                site_slug,
+            )
+        return inject_site_metadata(
+            {
+                "success": True,
+                "section_count": settings.get("section_count", 0),
+                "settings": settings.get("sections", {}),
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError):
+        raise
+    except Exception as e:
+        logger.error(f"Error getting site settings: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}

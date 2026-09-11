@@ -4,69 +4,20 @@ Firewall policy tools for Unifi Network MCP server.
 
 import json
 import logging
-import os
 from typing import Any, Dict, Optional
 
-from src.runtime import config, firewall_manager, network_manager, server
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
+from src.runtime import config, firewall_manager, network_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission  # CORRECTED import name
-from src.utils.site_resolver import (
-    resolve_site_identifier,
-    validate_site_access,
-    validate_site_parameter,
-)
+from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry  # Added
 
 logger = logging.getLogger(__name__)
-
-
-def _get_allowed_sites() -> Optional[list]:
-    """
-    Get list of allowed sites from UNIFI_SITE environment variable.
-
-    Returns:
-        List of allowed site slugs if UNIFI_SITE is set, None for ALL-SITES mode.
-    """
-    unifi_site = os.getenv("UNIFI_SITE", "")
-    if not unifi_site:
-        return None  # ALL-SITES mode
-    return [s.strip() for s in unifi_site.split(",") if s.strip()]
-
-
-async def _resolve_site_context(site: Optional[str]) -> Optional[str]:
-    """
-    Resolve site parameter to site slug and set firewall_manager context.
-
-    Args:
-        site: Optional site name/slug. If None, uses current default site.
-
-    Returns:
-        Original site slug if site was switched, None otherwise.
-
-    Raises:
-        SiteNotFoundError: Site not found in controller
-        SiteForbiddenError: Access to site denied by whitelist
-        InvalidSiteParameterError: Site parameter validation failed
-    """
-    if site is None:
-        return None
-
-    # Validate site parameter
-    site_validated = validate_site_parameter(site)
-
-    # Resolve site identifier
-    site_info = await resolve_site_identifier(site_validated)
-    site_slug = site_info["slug"]
-
-    # Validate whitelist access
-    allowed_sites = _get_allowed_sites()
-    await validate_site_access(site_slug, allowed_sites)
-
-    # Store original site and switch
-    original_site = firewall_manager._connection.site
-    firewall_manager._connection.site = site_slug
-
-    return original_site
 
 
 @server.tool(
@@ -127,13 +78,12 @@ async def list_firewall_policies(include_predefined: bool = False, site: Optiona
             "error": "Permission denied to list firewall policies.",
         }
 
-    original_site = None
     try:
-        # Handle site parameter
-        if site is not None:
-            original_site = await _resolve_site_context(site)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        policies = await firewall_manager.get_firewall_policies(include_predefined=include_predefined)
+        policies = await firewall_manager.get_firewall_policies(
+            include_predefined=include_predefined, site=site_slug
+        )
         policies_raw = [p.raw if hasattr(p, "raw") else p for p in policies]
 
         formatted_policies = [
@@ -148,30 +98,36 @@ async def list_firewall_policies(include_predefined: bool = False, site: Optiona
             }
             for p in policies_raw
         ]
-        return {
-            "success": True,
-            "site": firewall_manager._connection.site,
-            "count": len(formatted_policies),
-            "policies": formatted_policies,
-        }
+        return inject_site_metadata(
+            {
+                "success": True,
+                "site": site_slug,
+                "count": len(formatted_policies),
+                "policies": formatted_policies,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error listing firewall policies: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-    finally:
-        if original_site is not None:
-            firewall_manager._connection.site = original_site
 
 
 @server.tool(
     name="unifi_get_firewall_policy_details",
     description="Configuração detalhada de política de firewall UniFi Network específica — informações completas de regra, filtro ou controle de segurança identificado por ID único. Use quando precisar auditar configuração específica ou validar regra de proteção. Retorna ação, ruleset, protocolo, endereços e parâmetros da política no controlador UniFi.",
 )
-async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
+async def get_firewall_policy_details(policy_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """
     Gets the detailed configuration of a specific firewall policy by its ID.
 
     Args:
         policy_id (str): The unique identifier (_id) of the firewall policy.
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -214,7 +170,8 @@ async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
     try:
         if not policy_id:
             return {"success": False, "error": "policy_id is required"}
-        policies = await firewall_manager.get_firewall_policies(include_predefined=True)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        policies = await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
         policies_raw = [p.raw if hasattr(p, "raw") else p for p in policies]
         policy = next((p for p in policies_raw if p.get("_id") == policy_id), None)
         if not policy:
@@ -222,11 +179,19 @@ async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
                 "success": False,
                 "error": f"Firewall policy with ID '{policy_id}' not found.",
             }
-        return {
-            "success": True,
-            "policy_id": policy_id,
-            "details": json.loads(json.dumps(policy, default=str)),
-        }
+        return inject_site_metadata(
+            {
+                "success": True,
+                "policy_id": policy_id,
+                "details": json.loads(json.dumps(policy, default=str)),
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error getting firewall policy details for {policy_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -238,13 +203,16 @@ async def get_firewall_policy_details(policy_id: str) -> Dict[str, Any]:
     permission_category="firewall_policies",
     permission_action="update",
 )
-async def toggle_firewall_policy(policy_id: str, confirm: bool = False) -> Dict[str, Any]:
+async def toggle_firewall_policy(
+    policy_id: str, confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Enables or disables a specific firewall policy. Requires confirmation.
 
     Args:
         policy_id (str): The unique identifier (_id) of the firewall policy to toggle.
         confirm (bool): Must be explicitly set to `True` to execute the toggle operation. Defaults to `False`.
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -270,7 +238,8 @@ async def toggle_firewall_policy(policy_id: str, confirm: bool = False) -> Dict[
         }
 
     try:
-        policies = await firewall_manager.get_firewall_policies(include_predefined=True)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+        policies = await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
         policy_obj = next((p for p in policies if p.id == policy_id), None)
         if not policy_obj or not policy_obj.raw:
             return {
@@ -298,35 +267,56 @@ async def toggle_firewall_policy(policy_id: str, confirm: bool = False) -> Dict[
 
         logger.info(f"Attempting to toggle firewall policy '{policy_name}' ({policy_id}) to {new_state}")
 
-        success = await firewall_manager.toggle_firewall_policy(policy_id)
+        success = await firewall_manager.toggle_firewall_policy(policy_id, site=site_slug)
 
         if success:
             toggled_policy_obj = next(
-                (p for p in await firewall_manager.get_firewall_policies(include_predefined=True) if p.id == policy_id),
+                (
+                    p
+                    for p in await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
+                    if p.id == policy_id
+                ),
                 None,
             )
             final_state = toggled_policy_obj.enabled if toggled_policy_obj else new_state
 
             logger.info(f"Successfully toggled firewall policy '{policy_name}' ({policy_id}) to {final_state}")
-            return {
-                "success": True,
-                "policy_id": policy_id,
-                "enabled": final_state,
-                "message": f"Firewall policy '{policy_name}' ({policy_id}) toggled successfully to {'enabled' if final_state else 'disabled'}.",
-            }
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "policy_id": policy_id,
+                    "enabled": final_state,
+                    "message": f"Firewall policy '{policy_name}' ({policy_id}) toggled successfully to {'enabled' if final_state else 'disabled'}.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
             logger.error(f"Failed to toggle firewall policy '{policy_name}' ({policy_id}). Manager returned false.")
             policy_after_toggle_obj = next(
-                (p for p in await firewall_manager.get_firewall_policies(include_predefined=True) if p.id == policy_id),
+                (
+                    p
+                    for p in await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
+                    if p.id == policy_id
+                ),
                 None,
             )
             state_after = policy_after_toggle_obj.enabled if policy_after_toggle_obj else "unknown"
-            return {
-                "success": False,
-                "policy_id": policy_id,
-                "state_after_attempt": state_after,
-                "error": f"Failed to toggle firewall policy '{policy_name}' ({policy_id}). Check server logs.",
-            }
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "policy_id": policy_id,
+                    "state_after_attempt": state_after,
+                    "error": f"Failed to toggle firewall policy '{policy_name}' ({policy_id}). Check server logs.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error toggling firewall policy {policy_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -429,11 +419,8 @@ async def create_firewall_policy(
             "error": "policy_data must be a non-empty dictionary.",
         }
 
-    original_site = None
     try:
-        # Handle site parameter
-        if site is not None:
-            original_site = await _resolve_site_context(site)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # --- Use Validator Registry for Comprehensive Validation ---
         # This replaces the basic required field checks below
@@ -478,18 +465,23 @@ async def create_firewall_policy(
         logger.info(f"Attempting to create firewall policy '{policy_name}' in ruleset '{ruleset}'")
 
         # Call the new manager method
-        created_policy_obj = await firewall_manager.create_firewall_policy(policy_data_to_send)
+        created_policy_obj = await firewall_manager.create_firewall_policy(policy_data_to_send, site=site_slug)
 
         if created_policy_obj and hasattr(created_policy_obj, "raw"):
             created_policy_details = created_policy_obj.raw
             new_policy_id = created_policy_details.get("_id", "unknown")
             logger.info(f"Successfully created firewall policy '{policy_name}' with ID {new_policy_id}")
-            return {
-                "success": True,
-                "message": f"Firewall policy '{policy_name}' created successfully.",
-                "policy_id": new_policy_id,
-                "details": json.loads(json.dumps(created_policy_details, default=str)),  # Ensure serialization
-            }
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "message": f"Firewall policy '{policy_name}' created successfully.",
+                    "policy_id": new_policy_id,
+                    "details": json.loads(json.dumps(created_policy_details, default=str)),  # Ensure serialization
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
             # The manager method should log specific errors, return a generic failure here.
             logger.error(f"Failed to create firewall policy '{policy_name}'. Manager returned None or invalid object.")
@@ -500,6 +492,9 @@ async def create_firewall_policy(
                 "error": f"Failed to create firewall policy '{policy_name}'. Check manager logs for details (e.g., API errors, invalid data).",
             }
 
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         # Catch unexpected errors during the tool's execution
         logger.error(
@@ -507,9 +502,6 @@ async def create_firewall_policy(
             exc_info=True,
         )
         return {"success": False, "error": f"An unexpected error occurred: {str(e)}"}
-    finally:
-        if original_site is not None:
-            firewall_manager._connection.site = original_site
 
 
 @server.tool(
@@ -609,14 +601,11 @@ async def update_firewall_policy(
 
     updated_fields_list = list(validated_data.keys())
 
-    original_site = None
     try:
-        # Handle site parameter
-        if site is not None:
-            original_site = await _resolve_site_context(site)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Fetch current policy state for preview
-        policies = await firewall_manager.get_firewall_policies(include_predefined=True)
+        policies = await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
         current_policy_obj = next((p for p in policies if p.id == policy_id), None)
         if not current_policy_obj or not current_policy_obj.raw:
             return {
@@ -636,41 +625,59 @@ async def update_firewall_policy(
 
         logger.info(f"Attempting to update firewall policy '{policy_id}' with fields: {', '.join(updated_fields_list)}")
 
-        success = await firewall_manager.update_firewall_policy(policy_id, validated_data)
+        success = await firewall_manager.update_firewall_policy(policy_id, validated_data, site=site_slug)
 
         if success:
             updated_policy_obj = next(
-                (p for p in await firewall_manager.get_firewall_policies(include_predefined=True) if p.id == policy_id),
+                (
+                    p
+                    for p in await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
+                    if p.id == policy_id
+                ),
                 None,
             )
             updated_details = updated_policy_obj.raw if updated_policy_obj else {}
             logger.info(f"Successfully updated firewall policy ({policy_id})")
-            return {
-                "success": True,
-                "policy_id": policy_id,
-                "updated_fields": updated_fields_list,
-                "details": json.loads(json.dumps(updated_details, default=str)),
-            }
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "policy_id": policy_id,
+                    "updated_fields": updated_fields_list,
+                    "details": json.loads(json.dumps(updated_details, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
             logger.error(f"Failed to update firewall policy ({policy_id}). Manager returned false.")
             policy_after_update_obj = next(
-                (p for p in await firewall_manager.get_firewall_policies(include_predefined=True) if p.id == policy_id),
+                (
+                    p
+                    for p in await firewall_manager.get_firewall_policies(include_predefined=True, site=site_slug)
+                    if p.id == policy_id
+                ),
                 None,
             )
             details_after_attempt = policy_after_update_obj.raw if policy_after_update_obj else {}
-            return {
-                "success": False,
-                "policy_id": policy_id,
-                "error": f"Failed to update firewall policy ({policy_id}). Check server logs.",
-                "details_after_attempt": json.loads(json.dumps(details_after_attempt, default=str)),
-            }
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "policy_id": policy_id,
+                    "error": f"Failed to update firewall policy ({policy_id}). Check server logs.",
+                    "details_after_attempt": json.loads(json.dumps(details_after_attempt, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error updating firewall policy {policy_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-    finally:
-        if original_site is not None:
-            firewall_manager._connection.site = original_site
 
 
 @server.tool(
@@ -799,15 +806,27 @@ async def create_simple_firewall_policy(policy: Dict[str, Any], confirm: bool = 
     name="unifi_list_firewall_zones",
     description="Zonas de firewall do controlador UniFi Network via API V2 — áreas de segurança, segmentos de rede e perímetros configurados para isolamento e controle de tráfego. Use quando precisar listar zonas disponíveis, identificar segmentos de proteção ou configurar políticas baseadas em zona. Retorna lista completa de zonas definidas no controlador UniFi.",
 )
-async def list_firewall_zones() -> Dict[str, Any]:
-    zones = await firewall_manager.get_firewall_zones()
-    return {"success": True, "count": len(zones), "zones": zones}
+async def list_firewall_zones(site: Optional[str] = None) -> Dict[str, Any]:
+    site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+    zones = await firewall_manager.get_firewall_zones(site=site_slug)
+    return inject_site_metadata(
+        {"success": True, "count": len(zones), "zones": zones},
+        site_id,
+        site_name,
+        site_slug,
+    )
 
 
 @server.tool(
     name="unifi_list_ip_groups",
     description="Grupos de IP do controlador UniFi Network via API V2 — conjuntos de endereços, coleções de hosts e agrupamentos de rede configurados para aplicação em regras de firewall. Use quando precisar listar grupos disponíveis, identificar conjuntos de endereços ou configurar políticas baseadas em grupo. Retorna lista completa de IP groups no controlador UniFi.",
 )
-async def list_ip_groups() -> Dict[str, Any]:
-    groups = await firewall_manager.get_ip_groups()
-    return {"success": True, "count": len(groups), "ip_groups": groups}
+async def list_ip_groups(site: Optional[str] = None) -> Dict[str, Any]:
+    site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+    groups = await firewall_manager.get_ip_groups(site=site_slug)
+    return inject_site_metadata(
+        {"success": True, "count": len(groups), "ip_groups": groups},
+        site_id,
+        site_name,
+        site_slug,
+    )

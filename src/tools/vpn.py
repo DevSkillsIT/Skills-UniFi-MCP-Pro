@@ -7,7 +7,7 @@ Supports multi-site operations with optional site parameter.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from src.exceptions import (
     InvalidSiteParameterError,
@@ -15,12 +15,29 @@ from src.exceptions import (
     SiteNotFoundError,
 )
 from src.runtime import config, server, system_manager, vpn_manager
-from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
+from src.utils.confirmation import create_preview, preview_response, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
 from src.utils.site_context import inject_site_metadata, resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry
 
 logger = logging.getLogger(__name__)
+
+
+def _validate_optional(
+    resource_type: str, data: Dict[str, Any]
+) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+    """Validate `data` only when a schema is registered for `resource_type`.
+
+    UniFiValidatorRegistry carries no entry for the VPN resource types, and an
+    unregistered type answers "no validator found" -- a message that reads as
+    invalid input and rejects every create and update whatever the caller sends.
+    A missing schema is a gap in the registry, not a verdict on the request.
+    """
+    if UniFiValidatorRegistry.get_validator(resource_type) is None:
+        logger.warning(f"No validator registered for '{resource_type}'; forwarding the request unvalidated.")
+        return True, None, data
+    is_valid, error_msg, validated = UniFiValidatorRegistry.validate(resource_type, data)
+    return is_valid, error_msg, validated or {}
 
 
 @server.tool(
@@ -160,7 +177,7 @@ async def create_vpn_config(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the configuration data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("vpn_config_create", config_data)
+        is_valid, error_msg, validated_data = _validate_optional("vpn_config_create", config_data)
         if not is_valid:
             logger.warning(f"Invalid VPN configuration create data: {error_msg}")
             return {"success": False, "error": f"Invalid VPN configuration data: {error_msg}"}
@@ -243,7 +260,7 @@ async def update_vpn_config(
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Validate the update data
-        is_valid, error_msg, validated_data = UniFiValidatorRegistry.validate("vpn_config_update", update_data)
+        is_valid, error_msg, validated_data = _validate_optional("vpn_config_update", update_data)
         if not is_valid:
             logger.warning(f"Invalid VPN configuration update data for ID {config_id}: {error_msg}")
             return {"success": False, "error": f"Invalid update data: {error_msg}"}
@@ -336,11 +353,13 @@ async def delete_vpn_config(config_id: str, confirm: bool = False, site: Optiona
             return {"success": False, "error": "VPN configuration not found"}
 
         if not confirm and not should_auto_confirm():
-            return create_preview(
+            return preview_response(
+                action="delete",
                 resource_type="vpn_config",
                 resource_id=config_id,
                 resource_name=current.get("name"),
-                resource_data=current,
+                current_state=current,
+                proposed_changes={"deleted": True},
                 warnings=["This will permanently delete the VPN configuration"],
             )
 

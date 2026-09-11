@@ -4,9 +4,9 @@ Provides a unified way to register meta-tools (tool_index, execute, batch, job_s
 that work in both MCP server mode and dev console mode.
 """
 
+import json
 import logging
-import os
-from typing import TYPE_CHECKING, Callable, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 if TYPE_CHECKING:
     from src.utils.lazy_tool_loader import LazyToolLoader
@@ -15,59 +15,92 @@ logger = logging.getLogger("unifi-network-mcp")
 
 # Import site resolver for display name → slug resolution
 from src.utils.site_resolver import resolve_site_identifier
-from src.exceptions import SiteNotFoundError
+from src.exceptions import InvalidSiteParameterError, SiteForbiddenError, SiteNotFoundError
 
 
-def validate_site_parameter(site: Optional[str]) -> Optional[str]:
-    """Validate and normalize site parameter against UNIFI_ALLOWED_SITES whitelist.
+async def resolve_site_for_call(site: Optional[str]) -> Optional[str]:
+    """Resolve a site argument to the slug the tools expect.
 
-    Args:
-        site: Site parameter to validate (can be None)
-
-    Returns:
-        Validated site slug or None
-
-    Raises:
-        ValueError: If site parameter is invalid or not allowed
+    Delegates to the same resolver the tools use, so `unifi_execute` and a
+    direct tool call fail identically. The previous implementation kept its own
+    whitelist logic and its own message ("not allowed"), while the direct path
+    said "not found in UniFi Controller" for the very same input -- which sent
+    the reader to investigate the controller instead of the whitelist.
     """
     if site is None:
         return None
+    resolved = await resolve_site_identifier(site)
+    return resolved["slug"]
 
-    # Load allowed sites from environment
-    allowed_sites_str = os.getenv("UNIFI_ALLOWED_SITES", "")
-    if not allowed_sites_str:
-        logger.warning("UNIFI_ALLOWED_SITES not configured - allowing all sites")
-        return site.strip()
 
-    allowed_sites = [s.strip() for s in allowed_sites_str.split(",") if s.strip()]
+def tool_accepts_site(server, tool_name: str) -> bool:
+    """Whether `tool_name` declares a `site` parameter.
 
-    # Normalize input
-    site_normalized = site.strip().lower()
+    FastMCP validates arguments with a model that ignores unknown keys, so a
+    `site` handed to a tool that does not declare one is dropped without a
+    word and the call silently runs against the default site. Checking the
+    declared schema lets the caller be told instead.
+    """
+    try:
+        tool = server._tool_manager.get_tool(tool_name)
+    except Exception:
+        return False
+    if tool is None:
+        return False
+    properties = (tool.parameters or {}).get("properties") or {}
+    return "site" in properties
 
-    # Load friendly name mappings dynamically from environment
-    # Format: UNIFI_SITE_ALIASES=friendly1:actual_slug1,friendly2:actual_slug2
-    aliases_str = os.getenv("UNIFI_SITE_ALIASES", "")
-    friendly_map = {"default": "default"}  # Always include default
 
-    if aliases_str:
-        for alias_pair in aliases_str.split(","):
-            if ":" in alias_pair:
-                friendly, actual = alias_pair.split(":", 1)
-                friendly_map[friendly.strip().lower()] = actual.strip()
+def unwrap_tool_result(result: Any) -> Any:
+    """Turn what `server.call_tool` returns back into a plain value.
 
-    # Try friendly name resolution
-    resolved_site = friendly_map.get(site_normalized, site_normalized)
+    `call_tool` answers in one of two shapes depending on whether the tool
+    declares a return type:
 
-    # Validate against whitelist (case-insensitive)
-    allowed_sites_lower = [s.lower() for s in allowed_sites]
-    if resolved_site not in allowed_sites_lower:
-        raise ValueError(
-            f"Site '{site}' not allowed. Allowed sites: {', '.join(allowed_sites)}"
-        )
+      - `list[ContentBlock]`                    -- no structured output
+      - `(list[ContentBlock], structured_dict)` -- structured output, where a
+        non-model return value sits under the key "result"
 
-    # Return original casing from whitelist
-    idx = allowed_sites_lower.index(resolved_site)
-    return allowed_sites[idx]
+    Returning either shape straight out of a tool made FastMCP serialise an
+    already-serialised payload, so every `unifi_execute` and every
+    `unifi_batch_status` response carried the same data twice -- once as a JSON
+    string inside a text block and once as the structured object -- doubling
+    the token cost of every call that went through them.
+
+    The structured half is preferred when present because it is already a
+    Python object; the text blocks are only decoded as a fallback.
+    """
+    if isinstance(result, tuple) and len(result) == 2:
+        _blocks, structured = result
+        if isinstance(structured, dict):
+            if set(structured.keys()) == {"result"}:
+                return structured["result"]
+            return structured
+        return _decode_blocks(_blocks)
+
+    if isinstance(result, list):
+        return _decode_blocks(result)
+
+    return result
+
+
+def _decode_blocks(blocks: Any) -> Any:
+    """Decode a list of content blocks into plain Python values."""
+    if not isinstance(blocks, (list, tuple)):
+        return blocks
+    decoded = []
+    for block in blocks:
+        text = getattr(block, "text", None)
+        if text is None:
+            decoded.append(block)
+            continue
+        try:
+            decoded.append(json.loads(text))
+        except (TypeError, ValueError):
+            decoded.append(text)
+    if len(decoded) == 1:
+        return decoded[0]
+    return decoded
 
 
 def register_meta_tools(
@@ -100,19 +133,25 @@ def register_meta_tools(
     # =========================================================================
     @tool_decorator(
         name="unifi_tool_index",
-        description="""List all 80+ available UniFi tools and their schemas.
+        description="""List every UniFi tool currently registered on this server, with its full schema.
 
-CALL THIS FIRST to discover the right tool for your task.
-Tools are organized by category: clients, devices, networks, firewall, VPN, stats, etc.
+CALL THIS FIRST to discover the right tool for your task. The response carries
+the exact count under "count" -- how many tools are registered depends on the
+server's enabled_categories and permissions configuration, so read it rather
+than assuming a number.
+
+Tools are grouped by category: clients, devices, networks, stats, system,
+firewall, port forwards, QoS, VPN, routing, traffic routes, hotspot vouchers,
+user groups and events.
 
 After finding the right tool, use unifi_execute to run it.""",
     )
-    async def _tool_index_wrapper(args: dict | None = None) -> dict:
-        return await tool_index_handler(args)
+    async def _tool_index_wrapper() -> dict:
+        return await tool_index_handler(None)
 
     register_tool(
         name="unifi_tool_index",
-        description="CALL FIRST - List all 80+ UniFi tools with schemas to find the right one for your task.",
+        description="CALL FIRST - List the UniFi tools registered on this server with their schemas; the response reports the exact count.",
         input_schema={"type": "object", "properties": {}},
         output_schema={
             "type": "object",
@@ -162,28 +201,31 @@ For bulk/parallel operations, use unifi_batch instead.""",
         if arguments is None:
             arguments = {}
 
-        # Validate and resolve site parameter
         if site is not None:
+            if not tool_accepts_site(server, tool):
+                # Injecting it anyway would be dropped by argument validation and
+                # the call would quietly run against the default site.
+                return {
+                    "success": False,
+                    "error": (
+                        f"Tool '{tool}' does not accept a 'site' parameter, so the site you passed "
+                        f"cannot be honoured. Check the tool's schema via unifi_tool_index."
+                    ),
+                    "requested_site": site,
+                }
             try:
-                validated_site = validate_site_parameter(site)
-                if validated_site:
-                    # Resolve display name to actual site slug
-                    resolved = await resolve_site_identifier(validated_site)
-                    arguments = {**arguments, "site": resolved["slug"]}
-                    logger.info(f"Site resolved: '{site}' → '{validated_site}' → slug '{resolved['slug']}'")
-            except ValueError as e:
-                logger.error(f"Site validation failed for '{site}': {e}")
-                return {"error": str(e)}
-            except SiteNotFoundError as e:
-                logger.error(f"Site resolution failed for '{site}': {e}")
-                return {"error": str(e)}
+                slug = await resolve_site_for_call(site)
+                arguments = {**arguments, "site": slug}
+                logger.info(f"unifi_execute: site '{site}' resolved to slug '{slug}'")
+            except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+                return e.to_dict()
 
         try:
             result = await server.call_tool(tool, arguments)
-            return result
+            return unwrap_tool_result(result)
         except Exception as e:
             logger.error(f"Error executing tool '{tool}': {e}", exc_info=True)
-            return {"error": f"Failed to execute tool: {str(e)}"}
+            return {"success": False, "error": f"Failed to execute tool '{tool}': {e}"}
 
     register_tool(
         name="unifi_execute",
@@ -254,31 +296,30 @@ FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
             # Determine effective site parameter (priority: per-operation > global)
             effective_site = op_site if op_site is not None else site
 
-            # Validate and resolve site parameter
             if effective_site is not None:
-                try:
-                    validated_site = validate_site_parameter(effective_site)
-                    if validated_site:
-                        # Resolve display name to actual site slug
-                        resolved = await resolve_site_identifier(validated_site)
-                        arguments = {**arguments, "site": resolved["slug"]}
-                        logger.info(
-                            f"Batch operation {i} ({tool}): Site resolved '{effective_site}' → '{validated_site}' → slug '{resolved['slug']}'"
-                        )
-                except ValueError as e:
-                    logger.error(f"Batch operation {i}: Site validation failed for '{effective_site}': {e}")
-                    errors.append({"index": i, "tool": tool, "error": str(e)})
+                if not tool_accepts_site(server, tool):
+                    errors.append(
+                        {
+                            "index": i,
+                            "tool": tool,
+                            "error": f"Tool '{tool}' does not accept a 'site' parameter; the requested site cannot be honoured.",
+                            "requested_site": effective_site,
+                        }
+                    )
                     continue
-                except SiteNotFoundError as e:
-                    logger.error(f"Batch operation {i}: Site resolution failed for '{effective_site}': {e}")
-                    errors.append({"index": i, "tool": tool, "error": str(e)})
+                try:
+                    slug = await resolve_site_for_call(effective_site)
+                    arguments = {**arguments, "site": slug}
+                    logger.info(f"Batch operation {i} ({tool}): site '{effective_site}' resolved to slug '{slug}'")
+                except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+                    errors.append({"index": i, "tool": tool, **e.to_dict()})
                     continue
 
             try:
                 # Create a closure that captures the current tool and arguments
                 async def _make_executor(t, a):
                     async def _execute():
-                        return await server.call_tool(t, a)
+                        return unwrap_tool_result(await server.call_tool(t, a))
 
                     return _execute
 

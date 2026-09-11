@@ -11,10 +11,9 @@ Tools being tested:
 """
 
 import pytest
-import asyncio
 import sys
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from typing import Any, Dict, List
+from unittest.mock import AsyncMock, patch
+from typing import Any, Dict
 from pathlib import Path
 
 # Add the project root to path
@@ -114,15 +113,20 @@ class TestListClientsWithSite:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Acme Site"},
+            {"_id": "abc123", "name": "grupoacme", "desc": "Acme Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
             result = await resolve_site_identifier("acme")
-            assert result["slug"] == "abc123"
-            assert result["display_name"] == "GW_PON_ASAG_Escritorio"
+            # UniFi's own field convention: `name` is the API path slug,
+            # `_id` is the controller ObjectId, `desc` is the display name.
+            # Collapsing them is why the `_id` reported by list_sites could not
+            # be passed back as `site`.
+            assert result["slug"] == "grupoacme"
+            assert result["id"] == "abc123"
+            assert result["display_name"] == "Acme Site"
 
 
 class TestGetClientDetailsWithSite:
@@ -286,7 +290,7 @@ class TestClientOperationsWithSiteResolver:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": "Acme Site"},
+            {"_id": "abc123", "name": "grupoacme", "desc": "Acme Site"},
             {"_id": "def456", "name": "Bravo_Branch", "desc": "Bravo Site"},
         ]
 
@@ -295,13 +299,19 @@ class TestClientOperationsWithSiteResolver:
 
             # Test alias functionality (main validation for multi-site migration)
             result = await resolve_site_identifier("acme")
-            assert result["slug"] == "abc123"
-            assert result["display_name"] == "GW_PON_ASAG_Escritorio"
+            # UniFi's own field convention: `name` is the API path slug,
+            # `_id` is the controller ObjectId, `desc` is the display name.
+            # Collapsing them is why the `_id` reported by list_sites could not
+            # be passed back as `site`.
+            assert result["slug"] == "grupoacme"
+            assert result["id"] == "abc123"
+            assert result["display_name"] == "Acme Site"
             
-            # Test exact match functionality with available site
+            # Exact match on the slug
             result = await resolve_site_identifier("Bravo_Branch")
-            assert result["slug"] == "def456"
-            assert result["display_name"] == "Bravo_Branch"
+            assert result["slug"] == "Bravo_Branch"
+            assert result["id"] == "def456"
+            assert result["display_name"] == "Bravo Site"
 
 
 class TestClientSiteContextManagement:
@@ -348,17 +358,22 @@ class TestClientMultiSiteIntegration:
         from src.utils.site_resolver import resolve_site_identifier
 
         all_sites = [
-            {"_id": "abc123", "name": "GW_PON_ASAG_Escritorio", "desc": ""},
-            {"_id": "def456", "name": "default", "desc": ""},
+            {"_id": "abc123", "name": "grupoacme", "desc": "Acme Site"},
+            {"_id": "def456", "name": "default", "desc": "Default Site"},
         ]
 
         with patch("src.utils.site_resolver.get_all_sites", new_callable=AsyncMock) as mock_get:
             mock_get.return_value = all_sites
 
-            # Test with actual alias target from .env (acme -> GW_PON_ASAG_Escritorio)
+            # Fuzzy match: "acme" resolves to the site whose display name is "Acme Site"
             result = await resolve_site_identifier("acme")
-            assert result["slug"] == "abc123"
-            assert result["display_name"] == "GW_PON_ASAG_Escritorio"
+            # UniFi's own field convention: `name` is the API path slug,
+            # `_id` is the controller ObjectId, `desc` is the display name.
+            # Collapsing them is why the `_id` reported by list_sites could not
+            # be passed back as `site`.
+            assert result["slug"] == "grupoacme"
+            assert result["id"] == "abc123"
+            assert result["display_name"] == "Acme Site"
 
 
 class TestClientErrorHandling:

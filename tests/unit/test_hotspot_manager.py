@@ -73,15 +73,17 @@ class TestHotspotManager:
 
     @pytest.mark.asyncio
     async def test_get_vouchers_handles_dict_response(self, hotspot_manager, mock_connection):
-        """Test get_vouchers handles dict response with 'data' key."""
-        mock_connection.request.return_value = {
-            "data": [{"_id": "v1", "code": "ABC123"}],
-            "meta": {"rc": "ok"},
-        }
+        """Test get_vouchers wraps a single object answer in a list.
+
+        ConnectionManager.request already unwraps the {"meta", "data"} envelope,
+        so a dict reaching the manager is one voucher, not an envelope.
+        """
+        mock_connection.request.return_value = {"_id": "v1", "code": "ABC123"}
 
         vouchers = await hotspot_manager.get_vouchers()
 
         assert len(vouchers) == 1
+        assert vouchers[0]["code"] == "ABC123"
 
     @pytest.mark.asyncio
     async def test_get_vouchers_handles_error(self, hotspot_manager, mock_connection):
@@ -91,6 +93,23 @@ class TestHotspotManager:
         vouchers = await hotspot_manager.get_vouchers()
 
         assert vouchers == []
+
+    @pytest.mark.asyncio
+    async def test_get_vouchers_reports_missing_endpoint(self, hotspot_manager, mock_connection):
+        """Test a 404 on /stat/voucher is reported, never read as 'no vouchers'."""
+        from aiounifi.errors import ResponseError
+
+        from src.managers.hotspot_manager import EndpointNotServedError
+
+        mock_connection.request.side_effect = ResponseError(
+            "Call https://host/api/s/default/stat/voucher received 404 Not Found"
+        )
+
+        with pytest.raises(EndpointNotServedError) as excinfo:
+            await hotspot_manager.get_vouchers()
+
+        assert excinfo.value.error_code == "ENDPOINT_NOT_SERVED"
+        assert excinfo.value.details["path"] == "/stat/voucher"
 
     @pytest.mark.asyncio
     async def test_get_voucher_details_found(self, hotspot_manager, mock_connection):
@@ -209,3 +228,29 @@ class TestHotspotManager:
         result = await hotspot_manager.revoke_voucher("voucher123")
 
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_revoke_voucher_refused_by_controller(self, hotspot_manager, mock_connection):
+        """Test a controller refusal is a failure, not a silent success."""
+        mock_connection.request.return_value = {
+            "meta": {"rc": "error", "msg": "api.err.NoPermission"},
+            "data": [],
+        }
+
+        result = await hotspot_manager.revoke_voucher("voucher123")
+
+        assert result is False
+        assert mock_connection.request.call_args.kwargs["return_raw"] is True
+        mock_connection._invalidate_cache.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_voucher_refused_by_controller(self, hotspot_manager, mock_connection):
+        """Test a refused creation returns None instead of an empty batch."""
+        mock_connection.request.return_value = {
+            "meta": {"rc": "error", "msg": "api.err.InvalidPayload"},
+            "data": [],
+        }
+
+        result = await hotspot_manager.create_voucher(expire_minutes=60)
+
+        assert result is None

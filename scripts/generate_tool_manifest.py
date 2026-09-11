@@ -49,7 +49,7 @@ def generate_manifest() -> dict[str, Any]:
     # CRITICAL: Import main.py to trigger the server.tool monkey-patch
     # This ensures @server.tool decorators call register_tool()
     logger.info("   Setting up permissioned tool decorator...")
-    import src.main  # This monkey-patches server.tool with permissioned_tool
+    import src.main  # noqa: F401 -- imported for the side effect of patching server.tool
 
     # Force eager loading of all tools to populate TOOL_REGISTRY
     # We need to import the tool loader to trigger all tool registrations
@@ -111,9 +111,21 @@ def generate_manifest() -> dict[str, Any]:
 
         tools.append(tool_data)
 
+    # `module_map` is what `lazy_tool_loader._load_module_map_from_manifest()`
+    # reads when the tools directory is not on disk, as in a packaged install.
+    # The generator never wrote the key, so that fallback silently produced an
+    # empty map and no tool could be loaded on demand.
+    from src.utils.lazy_tool_loader import _build_tool_module_map
+
+    module_map = _build_tool_module_map()
+    missing = sorted(t["name"] for t in tools if t["name"] not in module_map)
+    if missing:
+        logger.warning("   Tools absent from the module map: %s", missing)
+
     manifest = {
         "tools": tools,
         "count": len(tools),
+        "module_map": module_map,
         "generated_by": "scripts/generate_tool_manifest.py",
         "note": "Auto-generated with full schemas from tool decorators. Do not edit manually.",
     }

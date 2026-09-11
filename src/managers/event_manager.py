@@ -1,30 +1,93 @@
-"""Event Manager for UniFi Network MCP server.
+"""Event log and alarm operations on the UniFi Network controller.
 
-Manages event log and alarm operations for viewing system events and alerts.
+Every method takes an explicit `site` and never mutates connection state.
+
+The paths in here are not served by every controller build: UniFi Network
+10.5.67 answers 404 for `/stat/event` and `/stat/alarm` on every site. A 404 is
+reported as `EndpointNotServedError` rather than folded into an empty list,
+because "this controller has no event API" and "this site had no events" are
+different answers and a caller that cannot tell them apart will report silence
+as calm.
 """
 
-import asyncio
+from __future__ import annotations
+
 import logging
 from typing import Any, Dict, List, Optional
 
-from aiounifi.models.api import ApiRequest
+from aiounifi.errors import ResponseError
 
-from .connection_manager import ConnectionManager
+from src.exceptions import UnifiMCPError
+
+from .base_manager import SiteScopedManager
 
 logger = logging.getLogger("unifi-network-mcp")
 
+# The controller refuses a larger page outright.
+MAX_EVENT_ROWS = 3000
 
-class EventManager:
-    """Manages event log operations on the UniFi Controller."""
 
-    def __init__(self, connection_manager: ConnectionManager):
-        """Initialize the Event Manager.
+class EndpointNotServedError(UnifiMCPError):
+    """The controller answered 404 for a path the operation depends on.
 
-        Args:
-            connection_manager: The shared ConnectionManager instance.
+    Carries the method, path and site so the caller can name the missing
+    capability instead of inferring it from an empty result.
+    """
+
+    def __init__(self, method: str, path: str, site: str, original_error: str = ""):
+        super().__init__(
+            error_code="ENDPOINT_NOT_SERVED",
+            message=(
+                f"This controller does not serve {method.upper()} {path} (HTTP 404). "
+                "The result is unknown, not empty."
+            ),
+            http_status=501,
+            details={
+                "method": method.upper(),
+                "path": path,
+                "site": site,
+                "controller_status": 404,
+                "original_error": original_error,
+            },
+        )
+
+    @staticmethod
+    def matches(error: Exception) -> bool:
+        """True when aiounifi reported HTTP 404 for the requested path.
+
+        aiounifi collapses the HTTP status into the exception text, so the
+        status is only recoverable as a string. The literal it formats is
+        "Call <url> received 404 Not Found"; matching the whole phrase keeps a
+        URL that merely contains "404" from being read as a missing endpoint,
+        and keeps the 429 that shares this exception type out.
         """
-        self._connection = connection_manager
-        self._cache_locks: Dict[str, asyncio.Lock] = {}
+        return isinstance(error, ResponseError) and "received 404" in str(error)
+
+
+class EventManager(SiteScopedManager):
+    """Manages event log and alarm operations on the UniFi Controller."""
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
+
+    async def _rows(
+        self,
+        method: str,
+        path: str,
+        data: Optional[Dict[str, Any]],
+        site: Optional[str],
+    ) -> List[Dict[str, Any]]:
+        """Read a list endpoint, keeping "unavailable" apart from "empty"."""
+        target = self._target_site(site)
+        try:
+            return await self._list(method, path, data, site=site)
+        except Exception as e:
+            if EndpointNotServedError.matches(e):
+                logger.error(f"{method.upper()} {path} not served by this controller (site={target})")
+                raise EndpointNotServedError(method, path, target, str(e)) from e
+            logger.error(f"Error reading {path} (site={target}): {e}", exc_info=True)
+            return []
 
     async def get_events(
         self,
@@ -34,58 +97,27 @@ class EventManager:
         event_type: Optional[str] = None,
         site: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get events from the controller.
-
-        Events are retrieved via POST to /stat/event with filter parameters.
+        """Get events from the controller via POST `/stat/event`.
 
         Args:
-            within: Hours to look back (default 24).
-            limit: Maximum number of events to return (default 100, max 3000).
-            start: Offset for pagination (default 0).
-            event_type: Optional filter for specific event type prefix (e.g., 'EVT_SW_').
-            site: Target site ID (slug). If None, uses current connection site.
+            within: Hours to look back.
+            limit: Maximum number of events to return, capped at MAX_EVENT_ROWS.
+            start: Offset for pagination.
+            event_type: Filter for an event type prefix (e.g. 'EVT_SW_').
+            site: Site slug or whitelisted display name.
 
-        Returns:
-            List of event objects containing timestamp, message, and event details.
+        Raises:
+            EndpointNotServedError: The controller does not serve `/stat/event`.
         """
-        # Events are time-sensitive, skip caching
-        target_site = site or self._connection.site
-        try:
-            original_site = self._connection.site
-            if target_site != original_site:
-                await self._connection.set_site(target_site)
-
-            payload: Dict[str, Any] = {
-                "within": within,
-                "_limit": min(limit, 3000),  # API max is 3000
-                "_start": start,
-            }
-
-            if event_type:
-                payload["type"] = event_type
-
-            api_request = ApiRequest(
-                method="post",
-                path="/stat/event",
-                data=payload,
-            )
-            response = await self._connection.request(api_request)
-
-            events = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
-
-            return events
-        except Exception as e:
-            logger.error(f"Error getting events (site={target_site}): {e}", exc_info=True)
-            return []
-        finally:
-            if target_site != self._connection.site:
-                await self._connection.set_site(original_site)
+        # Events are time-sensitive, so the cache is deliberately bypassed.
+        payload: Dict[str, Any] = {
+            "within": within,
+            "_limit": min(limit, MAX_EVENT_ROWS),
+            "_start": start,
+        }
+        if event_type:
+            payload["type"] = event_type
+        return await self._rows("post", "/stat/event", payload, site)
 
     async def get_alarms(
         self,
@@ -93,53 +125,22 @@ class EventManager:
         limit: int = 100,
         site: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Get active alarms/alerts from the controller.
-
-        Alarms are retrieved via GET to /stat/alarm.
+        """Get alarms from the controller via GET `/stat/alarm`.
 
         Args:
-            archived: Include archived alarms (default False).
-            limit: Maximum number of alarms to return (default 100).
-            site: Target site ID (slug). If None, uses current connection site.
+            archived: Include alarms already archived.
+            limit: Maximum number of alarms to return.
+            site: Site slug or whitelisted display name.
 
-        Returns:
-            List of alarm objects containing severity, message, and timestamp.
+        Raises:
+            EndpointNotServedError: The controller does not serve `/stat/alarm`.
         """
-        target_site = site or self._connection.site
-        try:
-            original_site = self._connection.site
-            if target_site != original_site:
-                await self._connection.set_site(target_site)
-
-            path = "/stat/alarm"
-            if archived:
-                path = "/stat/alarm?archived=true"
-
-            api_request = ApiRequest(method="get", path=path)
-            response = await self._connection.request(api_request)
-
-            alarms = (
-                response
-                if isinstance(response, list)
-                else response.get("data", [])
-                if isinstance(response, dict)
-                else []
-            )
-
-            return alarms[:limit]
-        except Exception as e:
-            logger.error(f"Error getting alarms (site={target_site}): {e}", exc_info=True)
-            return []
-        finally:
-            if target_site != self._connection.site:
-                await self._connection.set_site(original_site)
+        path = "/stat/alarm?archived=true" if archived else "/stat/alarm"
+        alarms = await self._rows("get", path, None, site)
+        return alarms[:limit]
 
     def get_event_type_prefixes(self) -> List[Dict[str, str]]:
-        """Get a list of known event type prefixes for filtering.
-
-        Returns:
-            List of dicts with prefix and description for common event types.
-        """
+        """Get the known event type prefixes usable as an event filter."""
         return [
             {"prefix": "EVT_SW_", "description": "Switch events"},
             {"prefix": "EVT_AP_", "description": "Access Point events"},
@@ -155,70 +156,41 @@ class EventManager:
             {"prefix": "EVT_DPI_", "description": "Deep Packet Inspection events"},
         ]
 
-    async def archive_alarm(self, alarm_id: str, site: Optional[str] = None) -> bool:
-        """Archive an alarm (mark as resolved).
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
 
-        Uses POST to /cmd/evtmgr with archive-alarm command.
+    async def _evtmgr(self, payload: Dict[str, Any], site: Optional[str], action: str, subject: str) -> bool:
+        """Send a `/cmd/evtmgr` command and report whether it was accepted.
 
-        Args:
-            alarm_id: The _id of the alarm to archive.
-            site: Target site ID (slug). If None, uses current connection site.
-
-        Returns:
-            True if successful, False otherwise.
+        A refusal by the controller (`rc: "error"`) is a False with the
+        controller's own message in the log; a 404 on the command path is a
+        different class of failure and is raised, since no amount of retrying
+        will make a missing endpoint accept the command.
         """
-        target_site = site or self._connection.site
+        target = self._target_site(site)
         try:
-            original_site = self._connection.site
-            if target_site != original_site:
-                await self._connection.set_site(target_site)
-
-            api_request = ApiRequest(
-                method="post",
-                path="/cmd/evtmgr",
-                data={
-                    "cmd": "archive-alarm",
-                    "_id": alarm_id,
-                },
-            )
-            await self._connection.request(api_request)
-            logger.info(f"Archived alarm {alarm_id}")
-            return True
+            response = await self._request("post", "/cmd/evtmgr", payload, site=site, return_raw=True)
         except Exception as e:
-            logger.error(f"Error archiving alarm {alarm_id}: {e}", exc_info=True)
+            if EndpointNotServedError.matches(e):
+                logger.error(f"POST /cmd/evtmgr not served by this controller (site={target})")
+                raise EndpointNotServedError("post", "/cmd/evtmgr", target, str(e)) from e
+            logger.error(f"Error on {action} for {subject} (site={target}): {e}")
             return False
-        finally:
-            if target_site != self._connection.site:
-                await self._connection.set_site(original_site)
+
+        if not self._succeeded(response):
+            message = (response or {}).get("meta", {}).get("msg", "unknown error")
+            logger.error(f"{action} refused for {subject} on {target}: {message}")
+            return False
+        logger.info(f"{action} accepted for {subject} on {target}")
+        return True
+
+    async def archive_alarm(self, alarm_id: str, site: Optional[str] = None) -> bool:
+        """Archive one alarm, marking it resolved."""
+        return await self._evtmgr({"cmd": "archive-alarm", "_id": alarm_id}, site, "archive-alarm", alarm_id)
 
     async def archive_all_alarms(self, site: Optional[str] = None) -> bool:
-        """Archive all active alarms.
-
-        Uses POST to /cmd/evtmgr with archive-all-alarms command.
-
-        Args:
-            site: Target site ID (slug). If None, uses current connection site.
-
-        Returns:
-            True if successful, False otherwise.
-        """
-        target_site = site or self._connection.site
-        try:
-            original_site = self._connection.site
-            if target_site != original_site:
-                await self._connection.set_site(target_site)
-
-            api_request = ApiRequest(
-                method="post",
-                path="/cmd/evtmgr",
-                data={"cmd": "archive-all-alarms"},
-            )
-            await self._connection.request(api_request)
-            logger.info("Archived all alarms")
-            return True
-        except Exception as e:
-            logger.error(f"Error archiving all alarms: {e}", exc_info=True)
-            return False
-        finally:
-            if target_site != self._connection.site:
-                await self._connection.set_site(original_site)
+        """Archive every active alarm on the site."""
+        return await self._evtmgr(
+            {"cmd": "archive-all-alarms"}, site, "archive-all-alarms", "all active alarms"
+        )

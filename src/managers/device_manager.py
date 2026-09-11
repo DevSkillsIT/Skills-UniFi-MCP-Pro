@@ -1,129 +1,112 @@
-import asyncio
-import logging
-from typing import Dict, List, Optional
+"""Device operations on the UniFi Network controller.
 
-from aiounifi.models.api import ApiRequest
+`reboot_device`, `adopt_device`, `rename_device` and `upgrade_device` now take
+a `site`. They did not before, so the tools that passed one raised `TypeError`,
+and a call that did land went to whichever site the shared connection was
+pointing at -- a reboot aimed at the wrong site.
+"""
+
+import logging
+from typing import Any, Dict, List, Optional
+
 from aiounifi.models.device import Device
 
-from .connection_manager import ConnectionManager
+from ..exceptions import ControllerRefusedError
+from .base_manager import SiteScopedManager
 
 logger = logging.getLogger("unifi-network-mcp")
 
 CACHE_PREFIX_DEVICES = "devices"
 
 
-class DeviceManager:
+class DeviceManager(SiteScopedManager):
     """Manages device-related operations on the Unifi Controller."""
 
-    def __init__(self, connection_manager: ConnectionManager):
-        """Initialize the Device Manager.
-
-        Args:
-            connection_manager: The shared ConnectionManager instance.
-        """
-        self._connection = connection_manager
-        self._cache_locks: Dict[str, asyncio.Lock] = {}
-
     async def get_devices(self, site: Optional[str] = None) -> List[Device]:
-        """Get list of devices for the target site (defaults to current)."""
-        if not await self._connection.ensure_connected() or not self._connection.controller:
-            return []
-
-        target_site = site or self._connection.site
-        cache_key = f"{CACHE_PREFIX_DEVICES}_{target_site}"
-        lock = self._cache_locks.setdefault(cache_key, asyncio.Lock())
-
-        async with lock:
-            cached_data: Optional[List[Device]] = self._connection.get_cached(cache_key)
-            if cached_data is not None:
-                return cached_data
-
-            original_site = self._connection.site
+        """List adopted devices for the target site."""
+        target = self._target_site(site)
+        cache_key = f"{CACHE_PREFIX_DEVICES}_{target}"
+        async with self._lock_for(cache_key):
+            cached: Optional[List[Device]] = self._connection.get_cached(cache_key)
+            if cached is not None:
+                return cached
             try:
-                if target_site != original_site:
-                    await self._connection.set_site(target_site)
-
-                await self._connection.controller.devices.update()
-                devices: List[Device] = list(self._connection.controller.devices.values())
+                raw = await self._list("get", "/stat/device", site=site)
+                devices = [Device(r) for r in raw]
                 self._connection._update_cache(cache_key, devices)
                 return devices
             except Exception as e:
-                logger.error(f"Error getting devices (site={target_site}): {e}")
+                logger.error(f"Error getting devices (site={target}): {e}")
                 return []
-            finally:
-                if target_site != original_site:
-                    await self._connection.set_site(original_site)
 
     async def get_device_details(self, device_mac: str, site: Optional[str] = None) -> Optional[Device]:
-        """Get detailed information for a specific device by MAC address."""
+        """Find one device by MAC, _id or name on the target site.
+
+        The tool documents this parameter as "MAC address or device name", so
+        matching only on MAC made a documented input silently fail.
+        """
+        needle = (device_mac or "").strip().lower()
+        if not needle:
+            return None
         devices = await self.get_devices(site=site)
-        device: Optional[Device] = next((d for d in devices if d.mac == device_mac), None)
-        if not device:
-            logger.debug(f"Device details for MAC {device_mac} not found in devices list.")
-        return device
+        for attr in ("mac", "_id", "name"):
+            for device in devices:
+                raw = device.raw if hasattr(device, "raw") else device
+                if str(raw.get(attr) or "").lower() == needle:
+                    return device
+        logger.debug(f"Device {device_mac} not found on site {self._target_site(site)}.")
+        return None
 
-    async def reboot_device(self, device_mac: str) -> bool:
-        """Reboot a device by MAC address."""
+    async def _devmgr(self, command: str, device_mac: str, site: Optional[str], extra: Optional[Dict[str, Any]] = None) -> bool:
+        """Send a /cmd/devmgr command and verify the controller accepted it."""
+        payload: Dict[str, Any] = {"mac": device_mac, "cmd": command}
+        if extra:
+            payload.update(extra)
         try:
-            api_request = ApiRequest(
-                method="post",
-                path="/cmd/devmgr",
-                data={"mac": device_mac, "cmd": "restart"},
-            )
-            await self._connection.request(api_request)
-            logger.info(f"Reboot command sent for device {device_mac}")
-            self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
-            return True
+            response = await self._request("post", "/cmd/devmgr", payload, site=site, return_raw=True)
+            self._require_ok(response, f"{command} device {device_mac}", site)
+        except ControllerRefusedError:
+            raise
         except Exception as e:
-            logger.error(f"Error rebooting device {device_mac}: {e}")
+            logger.error(f"Error sending {command} to device {device_mac}: {e}")
             return False
+        logger.info(f"{command} accepted for device {device_mac} on {self._target_site(site)}")
+        self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
+        return True
 
-    async def rename_device(self, device_mac: str, name: str) -> bool:
+    async def reboot_device(self, device_mac: str, site: Optional[str] = None) -> bool:
+        """Reboot a device by MAC address."""
+        return await self._devmgr("restart", device_mac, site)
+
+    async def adopt_device(self, device_mac: str, site: Optional[str] = None) -> bool:
+        """Adopt a device by MAC address."""
+        return await self._devmgr("adopt", device_mac, site)
+
+    async def upgrade_device(self, device_mac: str, site: Optional[str] = None) -> bool:
+        """Start a firmware upgrade for a device by MAC address."""
+        return await self._devmgr("upgrade", device_mac, site)
+
+    async def locate_device(self, device_mac: str, enable: bool = True, site: Optional[str] = None) -> bool:
+        """Flash (or stop flashing) a device's locate LED."""
+        return await self._devmgr("set-locate" if enable else "unset-locate", device_mac, site)
+
+    async def rename_device(self, device_mac: str, name: str, site: Optional[str] = None) -> bool:
         """Rename a device."""
         try:
-            device = await self.get_device_details(device_mac)
+            device = await self.get_device_details(device_mac, site=site)
             if not device or "_id" not in device.raw:
-                logger.error(f"Cannot rename device {device_mac}: Not found or missing ID.")
+                logger.error(f"Cannot rename device {device_mac}: not found on site {self._target_site(site)}.")
                 return False
             device_id = device.raw["_id"]
-
-            api_request = ApiRequest(method="put", path=f"/rest/device/{device_id}", data={"name": name})
-            await self._connection.request(api_request)
-            logger.info(f"Rename command sent for device {device_mac} to '{name}'")
+            response = await self._request(
+                "put", f"/rest/device/{device_id}", {"name": name}, site=site, return_raw=True
+            )
+            self._require_ok(response, f"rename device {device_mac}", site)
+            logger.info(f"Device {device_mac} renamed to '{name}' on {self._target_site(site)}")
             self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
             return True
+        except ControllerRefusedError:
+            raise
         except Exception as e:
             logger.error(f"Error renaming device {device_mac} to '{name}': {e}")
-            return False
-
-    async def adopt_device(self, device_mac: str) -> bool:
-        """Adopt a device by MAC address."""
-        try:
-            api_request = ApiRequest(
-                method="post",
-                path="/cmd/devmgr",
-                data={"mac": device_mac, "cmd": "adopt"},
-            )
-            await self._connection.request(api_request)
-            logger.info(f"Adopt command sent for device {device_mac}")
-            self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
-            return True
-        except Exception as e:
-            logger.error(f"Error adopting device {device_mac}: {e}")
-            return False
-
-    async def upgrade_device(self, device_mac: str) -> bool:
-        """Start firmware upgrade for a device by MAC address."""
-        try:
-            api_request = ApiRequest(
-                method="post",
-                path="/cmd/devmgr",
-                data={"mac": device_mac, "cmd": "upgrade"},
-            )
-            await self._connection.request(api_request)
-            logger.info(f"Upgrade command sent for device {device_mac}")
-            self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
-            return True
-        except Exception as e:
-            logger.error(f"Error upgrading device {device_mac}: {e}")
             return False

@@ -11,11 +11,12 @@ Tools being tested:
 """
 
 import pytest
-import asyncio
 import json
 import sys
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock, patch
+from typing import Any, Dict
+
+from src.utils.site_context import resolve_site_context
 from pathlib import Path
 
 # Add the project root to path
@@ -75,7 +76,7 @@ class TestListFirewallPoliciesWithSite:
     async def test_list_firewall_policies_with_site_fuzzy_matching(self):
         """RED: Should support fuzzy site matching (e.g., 'acme' for 'Acme')."""
         # Validates fuzzy site name matching
-        from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
+        from src.utils.site_resolver import validate_site_parameter
 
         # Test that fuzzy matching works
         result = validate_site_parameter("acme")
@@ -180,7 +181,7 @@ class TestSiteParameterIntegration:
     @pytest.mark.asyncio
     async def test_site_resolver_usage_in_firewall_tools(self):
         """RED: Firewall tools should use site_resolver for multi-site support."""
-        from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
+        from src.utils.site_resolver import validate_site_parameter
 
         # Test that we can validate a site parameter
         result = validate_site_parameter("acme")
@@ -346,34 +347,41 @@ class TestFirewallToolsSignatures:
 
     @pytest.mark.asyncio
     async def test_firewall_site_context_helpers(self):
-        """GREEN: Should use _resolve_site_context helper for site handling."""
-        # Verify that the helper function exists and can be imported
-        from src.tools.firewall import _resolve_site_context, _get_allowed_sites
+        """Firewall tools resolve sites through the shared site-context helper."""
+        from src.tools import firewall
 
-        assert callable(_resolve_site_context)
-        assert callable(_get_allowed_sites)
+        assert firewall.resolve_site_context is resolve_site_context
 
     @pytest.mark.asyncio
     async def test_firewall_helpers_consistency(self):
-        """GREEN: Site helpers should be consistent with devices.py pattern."""
-        from src.tools.firewall import _resolve_site_context, _get_allowed_sites
-        from src.tools.devices import _resolve_site_context as devices_resolve_site
-        from src.tools.devices import _get_allowed_sites as devices_get_allowed
+        """Every tool module resolves sites through the same implementation.
 
-        # Both implementations should exist (same pattern)
-        assert callable(_resolve_site_context)
-        assert callable(_get_allowed_sites)
-        assert callable(devices_resolve_site)
-        assert callable(devices_get_allowed)
+        There must be exactly one site-resolution path. Per-module copies are
+        how a correction lands on one tool and silently misses its neighbours.
+        """
+        import importlib
 
-    def test_firewall_imports_site_resolver(self):
-        """GREEN: Firewall module should import site resolver utilities."""
-        # This test verifies that the firewall module imports the correct utilities
+        for module_name in (
+            "clients",
+            "devices",
+            "firewall",
+            "network",
+            "port_forwards",
+            "stats",
+            "system",
+            "traffic_routes",
+        ):
+            module = importlib.import_module(f"src.tools.{module_name}")
+            assert module.resolve_site_context is resolve_site_context, (
+                f"src.tools.{module_name} does not use the shared resolve_site_context"
+            )
+
+    def test_firewall_defines_no_private_site_helpers(self):
+        """The firewall module must not re-implement site resolution."""
         from src.tools import firewall
 
-        # Check that the module is properly set up
-        assert hasattr(firewall, "_resolve_site_context")
-        assert hasattr(firewall, "_get_allowed_sites")
+        assert not hasattr(firewall, "_resolve_site_context")
+        assert not hasattr(firewall, "_get_allowed_sites")
 
 
 if __name__ == "__main__":

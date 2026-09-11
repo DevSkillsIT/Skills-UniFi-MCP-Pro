@@ -294,7 +294,15 @@ NETWORK_SCHEMA = {
             "default": False,
             "description": "Whether VLAN is enabled",
         },
-        "vlan": {"type": "string", "description": "VLAN ID (if VLAN is enabled)"},
+        # The controller stores and returns the VLAN id as a number, so the schema
+        # declares it as one. Declaring it a string rejected the very value the
+        # controller itself reports, which made network creation impossible.
+        "vlan": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4094,
+            "description": "VLAN ID 1-4094 (required when vlan_enabled is true)",
+        },
         "ip_subnet": {
             "type": "string",
             "description": "IP subnet in CIDR notation (e.g., '192.168.1.0/24')",
@@ -903,3 +911,35 @@ class UniFiResourceRegistry:
     def get_schema(cls, resource_type: str) -> Dict[str, Any]:
         """Get JSON schema for a resource type."""
         return cls._schemas.get(resource_type, {})
+
+# User group (bandwidth profile) schema.
+#
+# Field shape taken from what the controller returns on /rest/usergroup:
+# `name` plus an upload and a download ceiling in kbps, where -1 means
+# unlimited -- which is why the minimum is -1 and not 0.
+USERGROUP_SCHEMA = {
+    "type": "object",
+    "required": ["name"],
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "User group name",
+        },
+        "qos_rate_max_up": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Upload ceiling in kbps; -1 for unlimited",
+        },
+        "qos_rate_max_down": {
+            "type": "integer",
+            "minimum": -1,
+            "description": "Download ceiling in kbps; -1 for unlimited",
+        },
+    },
+    "additionalProperties": True,
+}
+
+USERGROUP_UPDATE_SCHEMA = copy.deepcopy(USERGROUP_SCHEMA)
+USERGROUP_UPDATE_SCHEMA.pop("required", None)

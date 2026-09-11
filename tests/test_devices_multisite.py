@@ -12,10 +12,9 @@ Tools being tested:
 """
 
 import pytest
-import asyncio
 import sys
-from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from typing import Any, Dict, List
+from unittest.mock import AsyncMock, patch
+from typing import Any, Dict
 from pathlib import Path
 
 # Add the project root to path
@@ -75,7 +74,6 @@ class TestListDevicesWithSite:
         """RED: Tool should accept optional site parameter."""
         # This test validates that the function signature supports site parameter
         # Test will pass after GREEN phase adds site: Optional[str] = None
-        import inspect
 
         # We'll check this by inspecting the tool decorator
         # For now, this is a placeholder showing the expected change
@@ -120,7 +118,7 @@ class TestSiteParameterIntegration:
         """RED: Device tools should use site_resolver for multi-site support."""
         # This test validates that tools use the site resolver
         # when site parameter is provided
-        from src.utils.site_resolver import validate_site_parameter, resolve_site_identifier
+        from src.utils.site_resolver import validate_site_parameter
 
         # Test that we can validate a site parameter
         result = validate_site_parameter("acme")

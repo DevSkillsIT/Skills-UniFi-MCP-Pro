@@ -5,7 +5,6 @@ Following RED-GREEN-REFACTOR TDD cycle.
 Fase 0: Infraestrutura de Exceções (BLOQUEANTE)
 """
 
-import pytest
 from src.exceptions import (
     UnifiMCPError,
     SiteNotFoundError,

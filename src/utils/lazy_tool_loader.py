@@ -4,10 +4,10 @@ This module implements true lazy loading of tools, registering them only
 when first called by an LLM. This dramatically reduces initial context usage.
 """
 
+import ast
 import importlib
 import json
 import logging
-import re
 from functools import wraps
 from pathlib import Path
 from typing import Any, Callable, Dict, Set
@@ -46,6 +46,34 @@ def _load_module_map_from_manifest() -> Dict[str, str]:
         return {}
 
 
+def _tool_names_in(source: str) -> Set[str]:
+    """Names registered by `@server.tool(name=...)` decorators in `source`.
+
+    Parsed from the syntax tree rather than matched as text. A substring search
+    for `name="unifi_..."` misses any tool whose name lacks the prefix -- which
+    `list_sites` does -- leaving it undiscoverable in lazy mode even though it
+    is a registered tool. It would equally match a `resource_name=` or
+    `device_name=` keyword somewhere else in the file.
+    """
+    names: Set[str] = set()
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            func = decorator.func
+            attr = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if attr not in ("tool", "permissioned_tool", "_original_tool"):
+                continue
+            for keyword in decorator.keywords:
+                if keyword.arg == "name" and isinstance(keyword.value, ast.Constant):
+                    if isinstance(keyword.value.value, str):
+                        names.add(keyword.value.value)
+    return names
+
+
 def _build_tool_module_map() -> Dict[str, str]:
     """Build tool-to-module mapping by scanning tool files.
 
@@ -77,19 +105,8 @@ def _build_tool_module_map() -> Dict[str, str]:
         module_name = f"src.tools.{tool_file.stem}"
 
         try:
-            # Read file and look for @server.tool or @permissioned_tool decorators
-            content = tool_file.read_text()
-
-            # Find tool names using simple pattern matching
-            # Looking for: name="unifi_xxx" or name='unifi_xxx'
-            # Note: pattern uses literal 'unifi_' prefix, not a character class
-            pattern = r'name\s*=\s*["\'](unifi_[a-z_]+)["\']'
-            matches = re.findall(pattern, content)
-
-            for tool_name in matches:
-                if tool_name.startswith("unifi_"):
-                    tool_map[tool_name] = module_name
-
+            for tool_name in _tool_names_in(tool_file.read_text()):
+                tool_map[tool_name] = module_name
         except Exception as e:
             logger.debug(f"Error scanning {tool_file}: {e}")
 

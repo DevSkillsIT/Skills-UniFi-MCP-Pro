@@ -56,28 +56,62 @@ logger = setup_logging()
 # ---------------------------------------------------------------------------
 
 
-def parse_allowed_sites(env_value: str) -> Optional[Set[str]]:
+def parse_allowed_sites_ordered(env_value: str) -> Optional[List[str]]:
     """
-    Parse UNIFI_SITE / UNIFI_ALLOWED_SITES env into a whitelist set.
+    Parse UNIFI_SITE / UNIFI_ALLOWED_SITES into a whitelist, order preserved.
+
+    Order matters: it decides the default site when UNIFI_DEFAULT_SITE is not
+    set. The previous implementation returned a `set` and then took
+    `next(iter(...))`, so the default site was whatever the hash seed happened
+    to yield -- measured as three different sites across five interpreter
+    starts on the same .env. Every tool called without an explicit `site` then
+    hit a site chosen at random, and that choice changed on every restart.
 
     Rules:
     - "ALL" (any casing) or empty => None (all sites allowed)
-    - Comma-separated list => set of stripped values
+    - Comma-separated list => list of stripped values, duplicates removed,
+      original order kept
     """
     if not env_value or env_value.strip().upper() == "ALL":
         return None
-    return {s.strip() for s in env_value.split(",") if s.strip()}
+    seen: Set[str] = set()
+    ordered: List[str] = []
+    for raw in env_value.split(","):
+        value = raw.strip()
+        if value and value not in seen:
+            seen.add(value)
+            ordered.append(value)
+    return ordered
+
+
+def parse_allowed_sites(env_value: str) -> Optional[Set[str]]:
+    """Set form of the whitelist, for membership tests only."""
+    ordered = parse_allowed_sites_ordered(env_value)
+    return set(ordered) if ordered is not None else None
+
+
+def choose_default_site(explicit: Optional[str], whitelist: Optional[List[str]]) -> str:
+    """Pick the site used when a tool is called without one.
+
+    Deterministic by construction: an explicit UNIFI_DEFAULT_SITE wins; then
+    the literal site "default" if the whitelist contains it; then the first
+    whitelist entry as written in the environment; finally "default".
+    """
+    if explicit and explicit.strip():
+        return explicit.strip()
+    if whitelist:
+        if "default" in whitelist:
+            return "default"
+        return whitelist[0]
+    return "default"
 
 
 RAW_ALLOWED_SITES = os.getenv("UNIFI_ALLOWED_SITES", "")
-ALLOWED_SITES = parse_allowed_sites(RAW_ALLOWED_SITES)
+ALLOWED_SITES_ORDERED = parse_allowed_sites_ordered(RAW_ALLOWED_SITES)
+ALLOWED_SITES = set(ALLOWED_SITES_ORDERED) if ALLOWED_SITES_ORDERED is not None else None
 
 # Default site when no site parameter is provided
-DEFAULT_SITE = os.getenv("UNIFI_DEFAULT_SITE")
-if not DEFAULT_SITE and ALLOWED_SITES:
-    # Use first allowed as default
-    DEFAULT_SITE = next(iter(ALLOWED_SITES))
-DEFAULT_SITE = DEFAULT_SITE or "default"
+DEFAULT_SITE = choose_default_site(os.getenv("UNIFI_DEFAULT_SITE"), ALLOWED_SITES_ORDERED)
 
 
 # Simple config error for startup validation

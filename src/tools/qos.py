@@ -4,12 +4,18 @@ QoS tools for Unifi Network MCP server.
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from src.runtime import config, qos_manager, server
+from src.exceptions import (
+    InvalidSiteParameterError,
+    SiteForbiddenError,
+    SiteNotFoundError,
+)
+from src.runtime import config, qos_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission
-from src.validator_registry import UniFiValidatorRegistry  # Added
+from src.utils.site_context import inject_site_metadata, resolve_site_context
+from src.validator_registry import UniFiValidatorRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +24,11 @@ logger = logging.getLogger(__name__)
     name="unifi_list_qos_rules",
     description="Regras de QoS do controlador UniFi Network — políticas de qualidade de serviço, priorização de tráfego e limites de banda configurados para controle de performance, bandwidth e latência. Use quando precisar listar QoS rules, auditar priorização ou revisar bandwidth limits. Retorna lista completa de regras com nome, status, direção e limites no controlador UniFi.",
 )
-async def list_qos_rules() -> Dict[str, Any]:
-    """Lists all Quality of Service (QoS) rules configured for the current UniFi site.
+async def list_qos_rules(site: Optional[str] = None) -> Dict[str, Any]:
+    """Lists all Quality of Service (QoS) rules configured for a UniFi site.
+
+    Args:
+        site (Optional[str]): Site name/slug. If None, uses the default site.
 
     Returns:
         A dictionary containing:
@@ -52,7 +61,9 @@ async def list_qos_rules() -> Dict[str, Any]:
         logger.warning("Permission denied for listing QoS rules.")
         return {"success": False, "error": "Permission denied to list QoS rules."}
     try:
-        qos_rules = await qos_manager.get_qos_rules()
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        qos_rules = await qos_manager.get_qos_rules(site=site_slug)
         rules_raw = [r.raw if hasattr(r, "raw") else r for r in qos_rules]
         formatted_rules = [
             {
@@ -63,12 +74,20 @@ async def list_qos_rules() -> Dict[str, Any]:
             }
             for r in rules_raw
         ]
-        return {
-            "success": True,
-            "site": qos_manager._connection.site,
-            "count": len(formatted_rules),
-            "qos_rules": formatted_rules,
-        }
+        return inject_site_metadata(
+            {
+                "success": True,
+                "site": site_slug,
+                "count": len(formatted_rules),
+                "qos_rules": formatted_rules,
+            },
+            site_id,
+            site_name,
+            site_slug,
+        )
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error listing QoS rules: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -78,11 +97,12 @@ async def list_qos_rules() -> Dict[str, Any]:
     name="unifi_get_qos_rule_details",
     description="Detalhes completos de regra de QoS UniFi Network específica — informações de política de qualidade de serviço, priorização de tráfego e limites de banda identificados por ID único. Use quando precisar auditar QoS rule específica, validar priorização ou revisar configuração de bandwidth. Retorna nome, interface, direção, limite e DSCP da QoS rule no controlador UniFi.",
 )
-async def get_qos_rule_details(rule_id: str) -> Dict[str, Any]:
+async def get_qos_rule_details(rule_id: str, site: Optional[str] = None) -> Dict[str, Any]:
     """Gets the detailed configuration of a specific QoS rule by its ID.
 
     Args:
         rule_id (str): The unique identifier (_id) of the QoS rule.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
 
     Returns:
         A dictionary containing:
@@ -117,38 +137,51 @@ async def get_qos_rule_details(rule_id: str) -> Dict[str, Any]:
     try:
         if not rule_id:
             return {"success": False, "error": "rule_id is required"}
-        # Assuming manager returns the raw dict or None
-        rule = await qos_manager.get_qos_rule_details(rule_id)
+
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        rule = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
         if rule:
-            # Return details - ensure serializable (using json.loads/dumps for safety)
-            return {
-                "success": True,
-                "site": qos_manager._connection.site,
-                "rule_id": rule_id,
-                "details": json.loads(json.dumps(rule, default=str)),
-            }
+            # json round-trip keeps controller values (dates, objects) serializable
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "site": site_slug,
+                    "rule_id": rule_id,
+                    "details": json.loads(json.dumps(rule, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
             return {
                 "success": False,
                 "error": f"QoS rule with ID '{rule_id}' not found.",
             }
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error getting QoS rule {rule_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
 @server.tool(
-    name="unifi_toggle_qos_rule_enabled",  # Renamed from update_qos_rule_state
+    name="unifi_toggle_qos_rule_enabled",
     description="Habilitação/desabilitação de regra de QoS UniFi Network via ID — alternância de estado de política de qualidade de serviço sem remoção permanente. Use quando precisar ativar/desativar QoS rule temporariamente, pausar priorização ou suspender limite de banda. Executa toggle de regra de QoS no controlador UniFi com confirmação obrigatória.",
     permission_category="qos_rules",
     permission_action="update",
 )
-async def toggle_qos_rule_enabled(rule_id: str, confirm: bool = False) -> Dict[str, Any]:  # Removed 'enabled' param
+async def toggle_qos_rule_enabled(
+    rule_id: str, confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Enables or disables a specific QoS rule. Requires confirmation.
 
     Args:
         rule_id (str): The unique identifier (_id) of the QoS rule to toggle.
         confirm (bool): Must be explicitly set to `True` to execute the toggle operation. Defaults to `False`.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
 
     Returns:
         A dictionary containing:
@@ -177,8 +210,10 @@ async def toggle_qos_rule_enabled(rule_id: str, confirm: bool = False) -> Dict[s
         return {"success": False, "error": "rule_id is required"}
 
     try:
-        # Fetch the rule first to determine current state and name
-        rule = await qos_manager.get_qos_rule_details(rule_id)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        # Current state decides the target state, so it is read from the same site the write targets
+        rule = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
         if not rule:
             return {
                 "success": False,
@@ -201,47 +236,59 @@ async def toggle_qos_rule_enabled(rule_id: str, confirm: bool = False) -> Dict[s
         logger.info(f"Attempting to toggle QoS rule '{rule_name}' ({rule_id}) to {new_state}")
 
         update_data = {"enabled": new_state}
-        # Assuming qos_manager.update_qos_rule handles fetch-merge-put or accepts partial data
-        # If it requires full object, this needs adjustment in the manager.
-        success = await qos_manager.update_qos_rule(rule_id, update_data)
+        success = await qos_manager.update_qos_rule(rule_id, update_data, site=site_slug)
 
         if success:
-            # Fetch again to confirm state
-            rule_after_toggle = await qos_manager.get_qos_rule_details(rule_id)
+            # Read back so the reported state is the stored one, not the requested one
+            rule_after_toggle = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
             final_state = rule_after_toggle.get("enabled", new_state) if rule_after_toggle else new_state
 
             logger.info(f"Successfully toggled QoS rule '{rule_name}' ({rule_id}) enabled status to {final_state}")
-            return {
-                "success": True,
-                "rule_id": rule_id,
-                "enabled": final_state,
-                "message": f"QoS rule '{rule_name}' ({rule_id}) toggled to {'enabled' if final_state else 'disabled'}.",
-            }
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "rule_id": rule_id,
+                    "enabled": final_state,
+                    "message": f"QoS rule '{rule_name}' ({rule_id}) toggled to {'enabled' if final_state else 'disabled'}.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
             logger.error(f"Failed to toggle QoS rule '{rule_name}' ({rule_id}). Manager returned false.")
-            # Fetch state after failure
-            rule_after_fail = await qos_manager.get_qos_rule_details(rule_id)
+            rule_after_fail = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
             state_after = rule_after_fail.get("enabled", "unknown") if rule_after_fail else "unknown"
-            return {
-                "success": False,
-                "rule_id": rule_id,
-                "state_after_attempt": state_after,
-                "error": f"Failed to toggle QoS rule '{rule_name}' ({rule_id}). Check server logs.",
-            }
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "rule_id": rule_id,
+                    "state_after_attempt": state_after,
+                    "error": f"Failed to toggle QoS rule '{rule_name}' ({rule_id}). Check server logs.",
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error toggling QoS rule {rule_id} state: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 
-# --- NEW UPDATE QOS RULE TOOL ---
+
 @server.tool(
     name="unifi_update_qos_rule",
     description="Atualização de regra de QoS UniFi Network via ID — modificação de nome, interface, direção, limite de banda ou valor DSCP com confirmação obrigatória. Use quando precisar ajustar QoS rule, modificar priorização ou alterar bandwidth limit. Executa update parcial de regra de QoS no controlador UniFi com suporte multi-site.",
     permission_category="qos_rules",
     permission_action="update",
 )
-async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
+async def update_qos_rule(
+    rule_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Updates specific fields of an existing Quality of Service (QoS) rule.
 
     Allows modifying properties like name, bandwidth limits, targeting, DSCP values, etc.
@@ -260,6 +307,7 @@ async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bo
             - dscp_value (integer): New DSCP value (0-63).
             - enabled (boolean): New enabled state.
         confirm (bool): Must be set to `True` to execute. Defaults to `False`.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
 
     Returns:
         Dict: Success status, ID, updated fields, details, or error message.
@@ -294,8 +342,9 @@ async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bo
         }
 
     try:
-        # Fetch current rule for preview
-        current = await qos_manager.get_qos_rule_details(rule_id)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        current = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
         if not current:
             return {
                 "success": False,
@@ -313,33 +362,41 @@ async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bo
 
         updated_fields_list = list(validated_data.keys())
         logger.info(f"Attempting to update QoS rule '{rule_id}' with fields: {', '.join(updated_fields_list)}")
-    except Exception as e:
-        logger.error(f"Error fetching QoS rule {rule_id} for preview: {e}", exc_info=True)
-        return {"success": False, "error": str(e)}
-    try:
-        # Assuming qos_manager.update_qos_rule handles fetch-merge-put or accepts partial data
-        success = await qos_manager.update_qos_rule(rule_id, validated_data)
-        error_message_detail = "QoS Manager update method might need verification for partial updates."
+
+        success = await qos_manager.update_qos_rule(rule_id, validated_data, site=site_slug)
 
         if success:
-            updated_rule = await qos_manager.get_qos_rule_details(rule_id)
+            updated_rule = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
             logger.info(f"Successfully updated QoS rule ({rule_id})")
-            return {
-                "success": True,
-                "rule_id": rule_id,
-                "updated_fields": updated_fields_list,
-                "details": json.loads(json.dumps(updated_rule, default=str)),
-            }
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "rule_id": rule_id,
+                    "updated_fields": updated_fields_list,
+                    "details": json.loads(json.dumps(updated_rule, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
         else:
-            logger.error(f"Failed to update QoS rule ({rule_id}). {error_message_detail}")
-            rule_after_update = await qos_manager.get_qos_rule_details(rule_id)
-            return {
-                "success": False,
-                "rule_id": rule_id,
-                "error": f"Failed to update QoS rule ({rule_id}). Check server logs. {error_message_detail}",
-                "details_after_attempt": json.loads(json.dumps(rule_after_update, default=str)),
-            }
+            logger.error(f"Failed to update QoS rule ({rule_id}).")
+            rule_after_update = await qos_manager.get_qos_rule_details(rule_id, site=site_slug)
+            return inject_site_metadata(
+                {
+                    "success": False,
+                    "rule_id": rule_id,
+                    "error": f"Failed to update QoS rule ({rule_id}). Check server logs.",
+                    "details_after_attempt": json.loads(json.dumps(rule_after_update, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
+            )
 
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error updating QoS rule {rule_id}: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -354,6 +411,7 @@ async def update_qos_rule(rule_id: str, update_data: Dict[str, Any], confirm: bo
 async def create_qos_rule(
     qos_data: Dict[str, Any],
     confirm: bool = False,
+    site: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Creates a new Quality of Service (QoS) rule with schema validation. Requires confirmation.
 
@@ -371,6 +429,7 @@ async def create_qos_rule(
             - dscp_value (integer): DSCP value (0-63).
             - enabled (boolean): Whether the rule is enabled (default: true).
         confirm (bool): Must be set to `True` to execute. Defaults to `False`.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
 
     Example:
     {
@@ -415,32 +474,36 @@ async def create_qos_rule(
     rule_name = validated_data["name"]
     logger.info(f"Attempting to create QoS rule '{rule_name}'")
     try:
-        # Pass validated data directly to manager
-        created_rule = await qos_manager.create_qos_rule(validated_data)
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        # Check manager response
+        created_rule = await qos_manager.create_qos_rule(validated_data, site=site_slug)
+
+        # A rule id is only reported when the controller echoed back the stored object
         if created_rule and created_rule.get("_id"):
             new_rule_id = created_rule.get("_id")
             logger.info(f"Successfully created QoS rule '{rule_name}' with ID {new_rule_id}")
-            return {
-                "success": True,
-                "site": qos_manager._connection.site,
-                "message": f"QoS rule '{rule_name}' created successfully.",
-                "rule_id": new_rule_id,
-                "details": json.loads(json.dumps(created_rule, default=str)),
-            }
-        else:
-            error_msg = (
-                created_rule.get("error", "Manager returned failure")
-                if isinstance(created_rule, dict)
-                else "Manager returned non-dict or failure"
+            return inject_site_metadata(
+                {
+                    "success": True,
+                    "site": site_slug,
+                    "message": f"QoS rule '{rule_name}' created successfully.",
+                    "rule_id": new_rule_id,
+                    "details": json.loads(json.dumps(created_rule, default=str)),
+                },
+                site_id,
+                site_name,
+                site_slug,
             )
-            logger.error(f"Failed to create QoS rule '{rule_name}'. Reason: {error_msg}")
+        else:
+            logger.error(f"Failed to create QoS rule '{rule_name}'.")
             return {
                 "success": False,
-                "error": f"Failed to create QoS rule '{rule_name}'. {error_msg}",
+                "error": f"Failed to create QoS rule '{rule_name}'. Check server logs.",
             }
 
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
     except Exception as e:
         logger.error(f"Error creating QoS rule '{rule_name}': {e}", exc_info=True)
         return {"success": False, "error": str(e)}
@@ -452,7 +515,9 @@ async def create_qos_rule(
     permission_category="qos_rules",
     permission_action="create",
 )
-async def create_simple_qos_rule(rule: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
+async def create_simple_qos_rule(
+    rule: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Create a QoS rule with a compact schema and optional preview.
 
     High-level schema (validated internally):
@@ -472,6 +537,11 @@ async def create_simple_qos_rule(rule: Dict[str, Any], confirm: bool = False) ->
     If *confirm* is False (default) the function only validates and returns the
     fully-expanded UniFi payload in a preview. Set *confirm* to True to commit
     the rule and return the controller's response.
+
+    Args:
+        rule (Dict[str, Any]): Compact QoS rule definition.
+        confirm (bool): Must be set to `True` to execute. Defaults to `False`.
+        site (Optional[str]): Site name/slug. If None, uses the default site.
     """
 
     if not parse_permission(config.permissions, "qos", "create"):
@@ -515,15 +585,26 @@ async def create_simple_qos_rule(rule: Dict[str, Any], confirm: bool = False) ->
             "message": "Set confirm=true to apply.",
         }
 
-    created = await qos_manager.create_qos_rule(payload)
+    try:
+        site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
+    except (SiteNotFoundError, SiteForbiddenError, InvalidSiteParameterError) as e:
+        logger.warning(f"Site parameter validation error: {e.message}")
+        raise
+
+    created = await qos_manager.create_qos_rule(payload, site=site_slug)
     if created is None or not isinstance(created, dict):
         return {
             "success": False,
             "error": "Controller rejected QoS rule creation. See logs.",
         }
 
-    return {
-        "success": True,
-        "rule_id": created.get("_id"),
-        "details": json.loads(json.dumps(created, default=str)),
-    }
+    return inject_site_metadata(
+        {
+            "success": True,
+            "rule_id": created.get("_id"),
+            "details": json.loads(json.dumps(created, default=str)),
+        },
+        site_id,
+        site_name,
+        site_slug,
+    )

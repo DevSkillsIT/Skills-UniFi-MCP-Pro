@@ -329,11 +329,14 @@ async def main_async():
     except Exception as e:
         logger.error(f"Error listing tools in main_async: {e}")
 
-    # Run stdio always; optionally run HTTP SSE based on config flag
+    # Run stdio always; optionally also serve Streamable HTTP based on config flag
     host = config.server.get("host", "0.0.0.0")
     port = int(config.server.get("port", 3000))
     http_cfg = config.server.get("http", {})
     http_enabled = parse_config_bool(http_cfg.get("enabled", False))
+    streamable_path = str(http_cfg.get("path", "/mcp") or "/mcp")
+    if not streamable_path.startswith("/"):
+        streamable_path = "/" + streamable_path
 
     # Only the main container process (PID 1) should bind the HTTP SSE port,
     # unless http.force=true is set in config (for local development/testing).
@@ -341,7 +344,7 @@ async def main_async():
     is_main_container_process = os.getpid() == 1
     if http_enabled and not is_main_container_process and not force_http:
         logger.info(
-            "HTTP SSE enabled in config but skipped in exec session (PID %s != 1). "
+            "Streamable HTTP enabled in config but skipped in exec session (PID %s != 1). "
             "Set UNIFI_MCP_HTTP_FORCE=true to override.",
             os.getpid(),
         )
@@ -358,53 +361,29 @@ async def main_async():
         async def health(request: Request):  # type: ignore[arg-type]
             return JSONResponse({"status": "healthy", "service": "unifi-network-mcp"})
 
-        # Test endpoint para validar resolução de sites (TEMPORÁRIO)
-        @server.custom_route("/test-site-resolution", methods=["GET"])
-        async def test_site_resolution(request: Request):  # type: ignore[arg-type]
-            """Endpoint de teste para validar resolução de display name → slug."""
-            from src.utils.site_resolver import resolve_site_identifier
-
-            # Get site parameter from query string
-            site_param = request.query_params.get("site")
-            if not site_param:
-                return JSONResponse({
-                    "success": False,
-                    "error": "Missing 'site' query parameter. Usage: /test-site-resolution?site=MA_PMW_MacHotel"
-                }, status_code=400)
-
-            try:
-                result = await resolve_site_identifier(site_param)
-                return JSONResponse({
-                    "success": True,
-                    "input": site_param,
-                    "resolved": {
-                        "slug": result["slug"],
-                        "id": result["id"]
-                    },
-                    "message": f"✅ Resolvido: '{site_param}' → slug='{result['slug']}'"
-                })
-            except Exception as e:
-                return JSONResponse({
-                    "success": False,
-                    "input": site_param,
-                    "error": str(e),
-                    "error_type": type(e).__name__
-                }, status_code=500)
-
         async def run_http():
             try:
-                logger.info(f"Starting FastMCP HTTP SSE server on {host}:{port} ...")
                 server.settings.host = host
                 server.settings.port = port
+                server.settings.streamable_http_path = streamable_path
+                # Stateful sessions: the client gets an Mcp-Session-Id and can
+                # resume a stream. Stateless would drop notifications between
+                # requests, which the tool_list_changed notification relies on.
+                server.settings.stateless_http = False
 
-                # Redirect uvicorn access logs to stderr to prevent stdout conflicts
-                # when running alongside stdio transport (stdout is used for JSON-RPC)
+                # uvicorn access logs must never reach stdout: stdout carries the
+                # JSON-RPC stream when the stdio transport runs alongside HTTP.
                 uvicorn.config.LOGGING_CONFIG["handlers"]["access"]["stream"] = "ext://sys.stderr"
 
-                await server.run_sse_async()
-                logger.info("HTTP SSE started via run_sse_async() using server.settings host/port.")
+                logger.info(
+                    "Starting FastMCP Streamable HTTP server on http://%s:%s%s",
+                    host,
+                    port,
+                    streamable_path,
+                )
+                await server.run_streamable_http_async()
             except Exception as http_e:
-                logger.error(f"HTTP SSE server failed to start: {http_e}")
+                logger.error(f"Streamable HTTP server failed to start: {http_e}")
                 logger.error(traceback.format_exc())
 
         tasks.append(run_http())

@@ -4,11 +4,12 @@ Port forward tools for Unifi Network MCP server.
 
 import json
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
-from src.runtime import config, firewall_manager, server
+from src.runtime import config, firewall_manager, server, system_manager
 from src.utils.confirmation import should_auto_confirm, toggle_preview, update_preview
 from src.utils.permissions import parse_permission
+from src.utils.site_context import resolve_site_context
 from src.validator_registry import UniFiValidatorRegistry  # Added for validation
 
 logger = logging.getLogger(__name__)  # Changed logger name for consistency
@@ -18,8 +19,11 @@ logger = logging.getLogger(__name__)  # Changed logger name for consistency
     name="unifi_list_port_forwards",
     description="Regras de port forwarding do controlador UniFi Network — redirecionamentos de portas, mapeamentos NAT e exposição de serviços internos para acesso externo via WAN. Use quando precisar listar port forwards, auditar NAT ou revisar exposição de serviços. Retorna lista completa de regras com protocolo, porta externa, IP interno e porta de destino no controlador UniFi.",
 )
-async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted return type
+async def list_port_forwards(site: Optional[str] = None) -> Dict[str, Any]:
     """List all port forwarding rules configured on the UniFi Network controller.
+
+    Args:
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -58,7 +62,9 @@ async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted r
         logger.warning("Permission denied for listing port forwards.")
         return {"success": False, "error": "Permission denied to list port forwards."}
     try:
-        rules = await firewall_manager.get_port_forwards()
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        rules = await firewall_manager.get_port_forwards(site=site_slug)
         rules_raw = [r.raw if hasattr(r, "raw") else r for r in rules]
         port_forward_list = [
             {
@@ -74,7 +80,7 @@ async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted r
         ]
         return {
             "success": True,
-            "site": firewall_manager._connection.site,
+            "site": site_slug,
             "count": len(port_forward_list),
             "port_forwards": port_forward_list,
         }
@@ -88,12 +94,13 @@ async def list_port_forwards() -> Dict[str, Any]:  # Removed context, adjusted r
     description="Detalhes completos de regra de port forwarding UniFi Network específica — informações de redirecionamento de porta, mapeamento NAT e exposição de serviço identificados por ID único. Use quando precisar auditar port forward específico, validar NAT ou revisar configuração de redirecionamento. Retorna protocolo, portas, IP de destino e habilitação da regra no controlador UniFi.",
 )
 async def get_port_forward(
-    port_forward_id: str,
-) -> Dict[str, Any]:  # Removed context, added param type hint
+    port_forward_id: str, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Get detailed information about a specific port forwarding rule by its ID.
 
     Args:
         port_forward_id (str): The unique identifier (_id) of the port forwarding rule.
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -130,7 +137,9 @@ async def get_port_forward(
         if not port_forward_id:
             return {"success": False, "error": "port_forward_id is required"}
 
-        rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
         rule = rule_obj.raw if (rule_obj and hasattr(rule_obj, "raw")) else rule_obj
 
         if not rule:
@@ -157,13 +166,14 @@ async def get_port_forward(
     permission_action="update",
 )
 async def toggle_port_forward(
-    port_forward_id: str, confirm: bool = False
-) -> Dict[str, Any]:  # Added confirm param, removed context
+    port_forward_id: str, confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Enables or disables a specific port forwarding rule. Requires confirmation.
 
     Args:
         port_forward_id (str): The unique identifier (_id) of the port forwarding rule to toggle.
         confirm (bool): Must be explicitly set to `True` to execute the toggle operation. Defaults to `False`.
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -191,7 +201,9 @@ async def toggle_port_forward(
         if not port_forward_id:
             return {"success": False, "error": "port_forward_id is required"}
 
-        rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
+        rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
         rule = rule_obj.raw if (rule_obj and hasattr(rule_obj, "raw")) else rule_obj
         if not rule:
             return {
@@ -219,16 +231,12 @@ async def toggle_port_forward(
         new_state = not current_enabled
 
         logger.info(f"Attempting to toggle port forward '{rule_name}' ({port_forward_id}) to {new_state}")
-        # Assuming toggle_port_forward directly updates the rule state.
-        # If firewall_manager.toggle_port_forward doesn't exist or works differently,
-        # we might need to fetch, modify 'enabled', and call update_port_forward.
-        # For now, assuming toggle_port_forward exists and returns success/failure.
 
-        # Let's simulate the update pattern more closely: fetch, modify, update
+        # The target state is written explicitly rather than delegating to the
+        # manager's own toggle, so the rule lands in the state the preview
+        # showed the caller even if something else changed it in between.
         update_payload = {"enabled": new_state}
-        # Assuming firewall_manager has an update_port_forward method
-        # This requires checking/adding the update_port_forward method in the manager layer
-        success = await firewall_manager.update_port_forward(port_forward_id, update_payload)
+        success = await firewall_manager.update_port_forward(port_forward_id, update_payload, site=site_slug)
 
         if success:
             logger.info(f"Successfully toggled port forward '{rule_name}' ({port_forward_id}) to {new_state}")
@@ -240,7 +248,7 @@ async def toggle_port_forward(
             }
         else:
             # Re-fetch to check the state if the update call failed
-            rule_after_toggle_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+            rule_after_toggle_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
             rule_after_toggle = (
                 rule_after_toggle_obj.raw
                 if (rule_after_toggle_obj and hasattr(rule_after_toggle_obj, "raw"))
@@ -267,8 +275,14 @@ async def toggle_port_forward(
     permission_category="port_forwards",
     permission_action="create",
 )
-async def create_port_forward(port_forward_data: Dict[str, Any]) -> Dict[str, Any]:
+async def create_port_forward(
+    port_forward_data: Dict[str, Any], site: Optional[str] = None
+) -> Dict[str, Any]:
     """Create a new port forwarding rule with comprehensive validation.
+
+    Args:
+        port_forward_data: The rule configuration described below.
+        site: Optional site name/slug. If None, uses current default site.
 
     Required parameters in port_forward_data:
     - name (string): Name for the port forwarding rule
@@ -319,6 +333,8 @@ async def create_port_forward(port_forward_data: Dict[str, Any]) -> Dict[str, An
         return {"success": False, "error": error}
 
     try:
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
         # Prepare data for the manager
         rule_data = {
             "name": validated_data["name"],
@@ -340,7 +356,7 @@ async def create_port_forward(port_forward_data: Dict[str, Any]) -> Dict[str, An
             f"({rule_data['proto']} {validated_data['dst_port']} -> {validated_data['fwd_ip']}:{validated_data['fwd_port']})"
         )
 
-        result = await firewall_manager.create_port_forward(rule_data)
+        result = await firewall_manager.create_port_forward(rule_data, site=site_slug)
 
         if result:
             new_rule_id = result if isinstance(result, str) else result.get("_id", "unknown")
@@ -380,7 +396,7 @@ async def create_port_forward(port_forward_data: Dict[str, Any]) -> Dict[str, An
     permission_action="update",
 )
 async def update_port_forward(
-    port_forward_id: str, update_data: Dict[str, Any], confirm: bool = False
+    port_forward_id: str, update_data: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
     """Updates specific fields of an existing port forwarding rule.
 
@@ -401,6 +417,7 @@ async def update_port_forward(
             - src_ip (string): New source IP/CIDR match (use empty string "" or null to remove).
             - log (boolean): New logging state (True/False).
         confirm (bool): Must be explicitly set to `True` to execute the update. Defaults to `False`.
+        site: Optional site name/slug. If None, uses current default site.
 
     Returns:
         A dictionary containing:
@@ -452,8 +469,10 @@ async def update_port_forward(
         }
 
     try:
+        _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
         # Fetch the existing rule first to ensure it exists
-        existing_rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+        existing_rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
         existing_rule = existing_rule_obj.raw if (existing_rule_obj and hasattr(existing_rule_obj, "raw")) else None
         if not existing_rule:
             return {
@@ -498,13 +517,13 @@ async def update_port_forward(
             f"Attempting to update port forward '{rule_name}' ({port_forward_id}) with fields: {', '.join(updated_fields_list)}"
         )
 
-        # Assume firewall_manager.update_port_forward(id, data) exists
-        # It should handle merging the update_payload with the existing rule internally or send only the changed fields
-        success = await firewall_manager.update_port_forward(port_forward_id, update_payload)
+        # The manager merges these fields onto the stored rule before sending,
+        # because the controller endpoint replaces the whole object.
+        success = await firewall_manager.update_port_forward(port_forward_id, update_payload, site=site_slug)
 
         if success:
             # Fetch the rule again to return the updated state
-            updated_rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+            updated_rule_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
             updated_rule = updated_rule_obj.raw if (updated_rule_obj and hasattr(updated_rule_obj, "raw")) else {}
 
             logger.info(f"Successfully updated port forward '{rule_name}' ({port_forward_id})")
@@ -517,7 +536,7 @@ async def update_port_forward(
         else:
             logger.error(f"Failed to update port forward '{rule_name}' ({port_forward_id}). Manager returned false.")
             # Attempt to fetch rule again to see if partial update occurred? Or just report failure.
-            rule_after_update_obj = await firewall_manager.get_port_forward_by_id(port_forward_id)
+            rule_after_update_obj = await firewall_manager.get_port_forward_by_id(port_forward_id, site=site_slug)
             rule_after_update = (
                 rule_after_update_obj.raw if (rule_after_update_obj and hasattr(rule_after_update_obj, "raw")) else {}
             )
@@ -541,8 +560,15 @@ async def update_port_forward(
     permission_category="port_forwards",
     permission_action="create",
 )
-async def create_simple_port_forward(rule: Dict[str, Any], confirm: bool = False) -> Dict[str, Any]:
+async def create_simple_port_forward(
+    rule: Dict[str, Any], confirm: bool = False, site: Optional[str] = None
+) -> Dict[str, Any]:
     """Create port forward with compact input.
+
+    Args:
+        rule: The compact rule described below.
+        confirm: Must be True to apply; otherwise a preview is returned.
+        site: Optional site name/slug. If None, uses current default site.
 
     Schema (validated internally):
     {
@@ -585,7 +611,9 @@ async def create_simple_port_forward(rule: Dict[str, Any], confirm: bool = False
             "message": "Set confirm=true to apply.",
         }
 
-    created = await firewall_manager.create_port_forward(payload)
+    _site_id, _site_name, site_slug = await resolve_site_context(site, system_manager)
+
+    created = await firewall_manager.create_port_forward(payload, site=site_slug)
     if created is None or not isinstance(created, dict):
         return {
             "success": False,

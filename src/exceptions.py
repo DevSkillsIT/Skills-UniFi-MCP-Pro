@@ -77,9 +77,13 @@ class SiteNotFoundError(UnifiMCPError):
             site_name: The site name that was not found
             suggestions: List of available site names to suggest to user
         """
-        message = f"Site '{site_name}' not found in UniFi Controller."
+        message = (
+            f"Site '{site_name}' does not exist on the UniFi Controller. "
+            "If you expected it to exist, check the identifier: a site can be named by its _id, "
+            "its API slug, or its display name."
+        )
         if suggestions:
-            message += f" Available sites: {', '.join(suggestions)}"
+            message += f" Allowed sites: {', '.join(suggestions)}"
 
         super().__init__(
             error_code="SITE_NOT_FOUND",
@@ -117,9 +121,13 @@ class SiteForbiddenError(UnifiMCPError):
             allowed_sites: List of allowed site names (None = ALL mode)
         """
         message = (
-            f"Access to site '{site_name}' is denied. "
-            "This site is not in the allowed list."
+            f"Site '{site_name}' is not allowed. It exists on the UniFi Controller but is not "
+            "in this server's allowed-sites list (UNIFI_ALLOWED_SITES). "
         )
+        if allowed_sites:
+            message += f"Allowed sites: {', '.join(allowed_sites)}."
+        else:
+            message += "No sites are currently allowed."
 
         super().__init__(
             error_code="SITE_ACCESS_DENIED",
@@ -209,4 +217,67 @@ class UnifiAPIUnavailableError(UnifiMCPError):
             message=message,
             http_status=503,
             details=error_details
+        )
+
+
+class ControllerRefusedError(UnifiMCPError):
+    """
+    Raised when the UniFi Controller rejects a write.
+
+    The controller states exactly why it refused, in `meta.msg` (for example
+    `api.err.InvalidFixedIP`, `api.err.ApGroupMissing`,
+    `api.err.UnknownStation`). That message used to be logged and then replaced
+    with a generic "Failed to ..." string, so the caller was told something went
+    wrong but never what -- and the one piece of information that would fix the
+    request was the piece thrown away.
+
+    HTTP Status: 400 Bad Request
+    Error Code: CONTROLLER_REFUSED
+    """
+
+    # Plain-language readings of the codes this server actually provokes.
+    HINTS = {
+        "api.err.InvalidFixedIP": (
+            "The fixed IP is outside the subnet of the network the client belongs to. "
+            "Choose an address inside that network's ip_subnet."
+        ),
+        "api.err.ApGroupMissing": (
+            "The controller requires an AP group on a WLAN. Pass ap_group_ids, or omit it "
+            "to have the site's default group applied."
+        ),
+        "api.err.UnknownStation": (
+            "The controller has no active session for this MAC. The command only applies "
+            "to a client that is currently associated."
+        ),
+        "api.err.NoPermission": (
+            "The account this server authenticates as is not allowed to write to this site."
+        ),
+        "api.err.InvalidObject": "The controller rejected the payload as malformed.",
+    }
+
+    def __init__(self, action: str, controller_message: str, site: Optional[str] = None):
+        """
+        Initialize ControllerRefusedError.
+
+        Args:
+            action: What was attempted, in the caller's terms.
+            controller_message: The controller's own `meta.msg`.
+            site: Site the write targeted, when applicable.
+        """
+        message = f"The UniFi Controller refused to {action}: {controller_message}"
+        hint = self.HINTS.get(controller_message)
+        if hint:
+            message += f" -- {hint}"
+        if site:
+            message += f" (site: {site})"
+
+        super().__init__(
+            error_code="CONTROLLER_REFUSED",
+            message=message,
+            http_status=400,
+            details={
+                "action": action,
+                "controller_message": controller_message,
+                "site": site,
+            },
         )

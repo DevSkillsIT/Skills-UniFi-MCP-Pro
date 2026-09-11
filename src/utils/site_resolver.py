@@ -8,6 +8,7 @@ Fase 1: Site Resolver + unifi_list_sites (CRÍTICA)
 import asyncio
 import logging
 import re
+import sys
 from typing import Any, Dict, List, Optional
 
 try:
@@ -32,50 +33,46 @@ _sites_lock = asyncio.Lock()
 
 
 async def get_all_sites() -> List[Dict[str, Any]]:
-    """
-    Fetch list of all sites from cached connection_manager mappings.
+    """Sites the whitelist allows, in the UniFi field convention.
 
-    IMPORTANTE: Usa o cache de connection_manager._site_name_to_id em vez de
-    chamar aiounifi, pois aiounifi retorna erro 'api.err.InvalidObject' para
-    o endpoint /api/self/sites.
+    Reads the registry the connection builds at login rather than calling the
+    API: `/api/self/sites` is a controller-level path, and handing it to
+    `ApiRequest` prefixes it with `/api/s/<site>`, which the controller rejects
+    as `api.err.InvalidObject`.
 
-    O cache é carregado durante a inicialização via HTTP direto e contém
-    os mapeamentos display_name → site_id.
+    The three fields mean three different things and all three are matchable:
+        _id   the controller's ObjectId for the site
+        name  the slug that appears in API paths (what `site=` ultimately needs)
+        desc  the human-readable display name
+
+    They used to be collapsed -- `_id` held the slug and `name` held the display
+    name -- so the `_id` that `list_sites` reported could not be passed back as
+    `site`, and the two views of the same site disagreed.
 
     Returns:
         List of site dicts with keys: _id, name, desc
 
     Raises:
-        Exception: Se houver erro ao acessar o cache
+        Exception: if the registry cannot be read
     """
     from src.runtime import connection_manager
 
     try:
-        # Obter cache de mapeamentos do connection_manager
-        site_mappings = connection_manager._site_name_to_id
+        registry = getattr(connection_manager, "_sites_by_slug", None) or {}
+        if registry:
+            return [
+                {"_id": entry.get("_id", ""), "name": entry.get("name", ""), "desc": entry.get("desc", "")}
+                for entry in registry.values()
+            ]
 
-        if not site_mappings:
-            logger.warning("Cache de sites vazio - nenhum site disponível")
+        # Before the registry exists, fall back to the display-name mapping.
+        mappings = connection_manager._site_name_to_id
+        if not mappings:
+            logger.warning("Site registry is empty; no site is available")
             return []
-
-        # Transformar formato do cache para formato esperado
-        # Cache: {display_name: site_id}
-        # Formato correto: [{"name": display_name, "desc": display_name, "_id": site_id}]
-        # "name" = display_name para matching user-friendly
-        # "_id" = site_id para API paths
-        sites = []
-        for display_name, site_id in site_mappings.items():
-            sites.append({
-                "name": display_name,   # Display name para matching (user-friendly)
-                "desc": display_name,   # Display name (nome legível)
-                "_id": site_id          # Site ID para paths da API
-            })
-
-        logger.debug(f"get_all_sites() retornou {len(sites)} sites do cache")
-        return sites
-
+        return [{"_id": slug, "name": slug, "desc": display} for display, slug in mappings.items()]
     except Exception as e:
-        logger.error(f"Erro ao buscar sites do cache: {e}")
+        logger.error(f"Error reading the site registry: {e}")
         raise
 
 
@@ -103,12 +100,12 @@ async def map_allowed_sites_to_ids(
         # Use direct site matching with fuzzy/prefix strategies
         allowed_norm = allowed.strip().lower()
         for site in sites:
-            display = (site.get("name") or site.get("desc") or "").lower()
+            display = (site.get("desc") or site.get("name") or "").lower()
             desc = (site.get("desc") or "").lower()
             site_id = (site.get("_id") or "").lower()
 
             if allowed_norm in {display, desc, site_id}:
-                mapped.append(site.get("_id", ""))
+                mapped.append(site.get("name", "") or site.get("_id", ""))
                 break
         else:
             logger.warning(
@@ -134,14 +131,19 @@ def validate_site_parameter(site: str) -> str:
     - Only alphanumeric, hyphens, and underscores allowed
     - Maximum 100 characters
     - Must not be empty
-    - Converted to lowercase
     - Whitespace trimmed
+    - Case preserved
+
+    Case is deliberately preserved. The whitelist in `_load_site_mappings` is
+    compared case-sensitively against the controller's display names, so
+    lower-casing "Grupo_Acme-Matriz" here would stop it matching.
+    Resolution itself is case-insensitive, so nothing is lost by keeping it.
 
     Args:
         site: Site parameter from user input
 
     Returns:
-        Normalized site parameter (lowercase, trimmed)
+        Trimmed site parameter, original casing intact
 
     Raises:
         InvalidSiteParameterError: If validation fails
@@ -204,19 +206,14 @@ async def resolve_site_identifier(site_input: str) -> Dict[str, str]:
     if not sites:
         raise SiteNotFoundError(site_input, suggestions=[])
 
-    # Strategy 1: Exact match (by name/display, _id, or desc)
+    # Strategy 1: exact match on any of the three identifiers
     for site in sites:
-        display_name = site.get("name", "")
-        site_name = display_name.lower()
-        site_id = site.get("_id", "").lower()
-        site_desc = site.get("desc", "").lower()
-
-        if site_name == site_lower or site_id == site_lower or site_desc == site_lower:
-            return {
-                "slug": site.get("_id", ""),  # Use ID for API path slug
-                "id": site.get("_id", ""),
-                "display_name": display_name or site.get("desc", ""),
-            }
+        if site_lower in {
+            site.get("name", "").lower(),
+            site.get("_id", "").lower(),
+            site.get("desc", "").lower(),
+        }:
+            return _site_context(site)
 
     # Strategy 2: Prefix match (case-insensitive)
     prefix_matches = [
@@ -225,12 +222,7 @@ async def resolve_site_identifier(site_input: str) -> Dict[str, str]:
         or s.get("desc", "").lower().startswith(site_lower)
     ]
     if len(prefix_matches) == 1:
-        site = prefix_matches[0]
-        return {
-            "slug": site.get("_id", ""),
-            "id": site.get("_id", ""),
-            "display_name": site.get("name", "") or site.get("desc", ""),
-        }
+        return _site_context(prefix_matches[0])
 
     # Strategy 3: Fuzzy matching (threshold 80%)
     matches = []
@@ -250,16 +242,58 @@ async def resolve_site_identifier(site_input: str) -> Dict[str, str]:
         # With token_set_ratio, 60% is a good threshold for substrings
         # e.g., "acme" matching "grupo acme" = 100%, "acme" in "grupoacme" = 61%
         if best_match[1] >= 60:
-            site = best_match[0]
-            return {
-                "slug": site.get("_id", ""),
-                "id": site.get("_id", ""),
-                "display_name": site.get("name", "") or site.get("desc", ""),
-            }
+            return _site_context(best_match[0])
 
-    # Not found - provide suggestions
-    available_sites = [s.get("name", "") or s.get("desc", "") or s.get("_id", "") for s in sites[:5]]
+    # Nothing in the allowed set matched. Before reporting "not found", ask the
+    # controller registry whether the site exists at all: a site that exists but
+    # is outside the whitelist is a permission problem, not a missing site, and
+    # reporting it as missing sends the reader to audit the controller instead
+    # of the whitelist.
+    if _exists_outside_whitelist(validated_input):
+        raise SiteForbiddenError(
+            site_input,
+            allowed_sites=[s.get("desc", "") or s.get("name", "") for s in sites if s.get("name")],
+        )
+
+    available_sites = [s.get("desc", "") or s.get("name", "") or s.get("_id", "") for s in sites[:5]]
     raise SiteNotFoundError(site_input, suggestions=available_sites)
+
+
+def _exists_outside_whitelist(site: str) -> bool:
+    """Whether the controller knows this site even though the whitelist hides it.
+
+    Reads `src.runtime` only if it is already imported, via `sys.modules`,
+    instead of importing it. Importing the runtime from here would pull in the
+    whole configuration stack as a side effect of an error path -- which is both
+    a surprising dependency for a pure resolver and enough to break any caller
+    that has the configuration layer stubbed.
+
+    When the runtime is not loaded there is nothing to consult, so the answer is
+    "unknown", and the caller reports the site as not found: the conservative
+    reading, since claiming a site exists when that cannot be checked would be
+    worse than under-reporting.
+    """
+    runtime = sys.modules.get("src.runtime")
+    connection = getattr(runtime, "connection_manager", None) if runtime else None
+    checker = getattr(connection, "site_exists_on_controller", None) if connection else None
+    if checker is None:
+        return False
+    try:
+        return bool(checker(site))
+    except Exception:
+        return False
+
+
+def _site_context(site: Dict[str, Any]) -> Dict[str, str]:
+    """Build the (slug, id, display_name) triple tools carry around.
+
+    `slug` is the API path segment, which is the `name` field -- not `_id`.
+    """
+    return {
+        "slug": site.get("name", "") or site.get("_id", ""),
+        "id": site.get("_id", "") or site.get("name", ""),
+        "display_name": site.get("desc", "") or site.get("name", ""),
+    }
 
 
 def _fuzzy_score(s1: str, s2: str) -> int:

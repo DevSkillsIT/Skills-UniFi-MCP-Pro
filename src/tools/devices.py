@@ -7,9 +7,7 @@ Supports multi-site operations with optional site parameter.
 
 import logging
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
-
-print("🔍 [DEBUG] devices.py module loading...")
+from typing import Any, Dict, List, Optional
 
 from src.exceptions import (
     InvalidSiteParameterError,
@@ -17,10 +15,48 @@ from src.exceptions import (
     SiteNotFoundError,
 )
 from src.runtime import device_manager, server, system_manager
-from src.utils.confirmation import create_preview, should_auto_confirm
+from src.utils.confirmation import action_preview, should_auto_confirm
 from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
+
+# Radio band codes as the controller reports them in `radio_table` / `radio_table_stats`.
+RADIO_BAND_LABELS = {
+    "ng": "2.4GHz",
+    "na": "5GHz",
+    "6e": "6GHz",
+    "ax": "6GHz",
+}
+
+
+def get_wifi_bands(device_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Describe the radios an access point is currently running.
+
+    Reads `radio_table_stats` when present because it carries the live channel,
+    client count and utilisation; falls back to the static `radio_table` when
+    the device has not reported statistics yet. Returns an empty list for a
+    device with no radios rather than raising, so a switch or gateway passed
+    here is simply reported as having none.
+    """
+    radios = device_raw.get("radio_table_stats") or device_raw.get("radio_table") or []
+    bands: List[Dict[str, Any]] = []
+    for radio in radios:
+        if not isinstance(radio, dict):
+            continue
+        code = radio.get("radio")
+        bands.append(
+            {
+                "band": RADIO_BAND_LABELS.get(code, code or "unknown"),
+                "radio_code": code,
+                "interface": radio.get("name"),
+                "channel": radio.get("channel"),
+                "channel_width_mhz": radio.get("ht"),
+                "tx_power_dbm": radio.get("tx_power"),
+                "clients": radio.get("num_sta"),
+                "channel_utilization_percent": radio.get("cu_total"),
+            }
+        )
+    return bands
 
 
 @server.tool(
@@ -43,17 +79,13 @@ async def list_devices(
         Dict with optimized device list and metadata
     """
     try:
-        print("🔍 [DEBUG] list_devices() starting...")
-
         # Enforce reasonable limits
         limit = min(max(1, limit), 100)
 
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
-        print(f"🔍 [DEBUG] Resolved site: {site_slug}")
 
         devices = await device_manager.get_devices(site=site_slug)
-        print(f"🔍 [DEBUG] Got {len(devices)} devices from controller")
 
         # Convert Device objects to plain dictionaries
         devices_raw = [d.raw if hasattr(d, "raw") else d for d in devices]
@@ -101,11 +133,10 @@ async def list_devices(
             "token_usage": "optimized" if summary else "high",
         }
 
-        print(f"🔍 [DEBUG] Returning {len(devices_optimized)} devices")
         return inject_site_metadata(result, site_id, site_name, site_slug)
 
     except Exception as e:
-        logger.error(f"🔍 [DEBUG] Error in list_devices: {e}", exc_info=True)
+        logger.error(f"Error listing devices: {e}", exc_info=True)
         return inject_site_metadata(
             {
                 "success": False,
@@ -270,17 +301,19 @@ async def reboot_device(mac_address: str, confirm: bool = False, site: Optional[
         device_name = device_raw.get("name", "Unknown Device")
 
         # Create preview for confirmation
-        if not confirm and not should_auto_confirm():
-            preview = create_preview(
-                action="reboot", target=f"device '{device_name}' ({mac_address})", site=site_name or site_slug
-            )
+        if not confirm and not should_auto_confirm("reboot"):
+            # The preview is the response, not a field inside another envelope that
+            # repeats its own success and confirmation flags.
             return inject_site_metadata(
-                {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "preview": preview,
-                    "message": "Please confirm the device reboot operation",
-                },
+                action_preview(
+                    action="reboot",
+                    target=f"device '{device_name}' ({mac_address})",
+                    site=site_name or site_slug,
+                    consequences=[
+                    "The device drops off the network while it restarts.",
+                    "Clients connected through it lose connectivity until it is back.",
+                    ],
+                ),
                 site_id,
                 site_name,
                 site_slug,
@@ -347,17 +380,18 @@ async def adopt_device(mac_address: str, confirm: bool = False, site: Optional[s
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
         # Create preview for confirmation
-        if not confirm and not should_auto_confirm():
-            preview = create_preview(
-                action="adopt", target=f"device with MAC {mac_address}", site=site_name or site_slug
-            )
+        if not confirm and not should_auto_confirm("adopt"):
+            # The preview is the response, not a field inside another envelope that
+            # repeats its own success and confirmation flags.
             return inject_site_metadata(
-                {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "preview": preview,
-                    "message": "Please confirm the device adoption operation",
-                },
+                action_preview(
+                    action="adopt",
+                    target=f"device with MAC {mac_address}",
+                    site=site_name or site_slug,
+                    consequences=[
+                        "The device is provisioned into this site and takes its configuration.",
+                    ],
+                ),
                 site_id,
                 site_name,
                 site_slug,

@@ -1,19 +1,44 @@
 import asyncio
 import logging
-import os
 import time
 import time as _time
 from typing import Any, Dict, Optional
 
 import aiohttp
 from aiounifi.controller import Controller
-from aiounifi.errors import LoginRequired, RequestError, ResponseError
+from aiounifi.errors import Forbidden, LoginRequired, RequestError, ResponseError
 from aiounifi.models.api import ApiRequest, ApiRequestV2
 from aiounifi.models.configuration import Configuration
 
 from src.bootstrap import ALLOWED_SITES  # Site whitelist (None = ALL)
+from src.exceptions import ControllerRefusedError
 
 logger = logging.getLogger("unifi-network-mcp")
+
+
+def _controller_reason(error: Exception) -> Optional[str]:
+    """The controller's own `meta.msg` carried by an aiounifi exception.
+
+    On HTTP 400 aiounifi decodes the body and raises with the whole envelope as
+    the exception argument, so the reason the controller gave -- for instance
+    `api.err.InvalidFixedIP` or `api.err.ApGroupMissing` -- is recoverable. On
+    403 it raises with no body at all, and the reason is known from the status.
+
+    Returns None for anything else, notably the 404 that `ResponseError`
+    reports, so "this controller does not serve that path" stays distinguishable
+    from "the controller refused this write".
+    """
+    if isinstance(error, Forbidden):
+        return "api.err.NoPermission"
+    for arg in getattr(error, "args", ()):
+        if not isinstance(arg, dict):
+            continue
+        # V1 puts the reason in meta.msg; V2 answers a flat body with errorCode
+        # and message and no meta at all.
+        message = (arg.get("meta") or {}).get("msg") or arg.get("message") or arg.get("errorCode")
+        if message:
+            return str(message)
+    return None
 
 
 async def detect_unifi_os_pre_login(
@@ -254,9 +279,34 @@ class ConnectionManager:
         # Site NAME → ID mapping cache (CRÍTICO: UniFi API usa ID, não nome)
         self._site_name_to_id: Dict[str, str] = {}
         """
-        Mapeamento de site NAME → site ID.
-        Exemplo: {"SK_PMW_SkillsIT-Escritorio": "i06j58bm"}
+        Mapeamento de display name → site slug, **restrito à whitelist**.
+        Exemplo: {"Grupo Acme": "grupoacme"}
         Carregado via _load_site_mappings() após autenticação.
+        """
+
+        self._all_site_name_to_id: Dict[str, str] = {}
+        """
+        Mapeamento display name → site slug de **todos** os sites do controlador,
+        independentemente da whitelist.
+
+        Existe para distinguir dois erros que antes se confundiam:
+        - site inexistente no controlador  -> 404 SITE_NOT_FOUND
+        - site existente, fora da whitelist -> 403 SITE_ACCESS_DENIED
+        Nunca é exposto a tools; serve apenas para classificar o erro.
+        """
+
+        self._sites_by_slug: Dict[str, Dict[str, str]] = {}
+        """
+        Registro completo por slug: {slug: {"_id", "name" (slug), "desc" (display)}}.
+        Guarda o _id real (ObjectId) do site, que o slug NÃO é.
+        Restrito à whitelist, como _site_name_to_id.
+        """
+
+        self._request_lock = asyncio.Lock()
+        """
+        Serializa requests porque o site alvo é estado do Controller compartilhado
+        (`connectivity.config.site`). Sem esse lock, uma chamada com site=X trocaria
+        o site por baixo de uma chamada concorrente com site=Y.
         """
 
     @property
@@ -413,8 +463,8 @@ class ConnectionManager:
 
         CRÍTICO: UniFi API usa site ID (campo 'name') nas URLs, não o display name (campo 'desc').
         Exemplo:
-        - Site ID: 'i06j58bm' (usado em /api/s/i06j58bm/...)
-        - Display Name: 'SK_PMW_SkillsIT-Escritorio' (nome legível)
+        - Site ID: 'grupoacme' (usado em /api/s/grupoacme/...)
+        - Display Name: 'Grupo Acme' (nome legível)
 
         Este método:
         1. Busca todos os sites do controller (/api/self/sites)
@@ -447,24 +497,38 @@ class ConnectionManager:
                 sites = data["data"]
                 logger.debug(f"Controller retornou {len(sites)} sites")
 
+                # Reconstrói do zero: reconexão não pode acumular entradas velhas.
+                self._site_name_to_id.clear()
+                self._all_site_name_to_id.clear()
+                self._sites_by_slug.clear()
+
                 # Construir mapeamento NAME → ID (apenas sites na whitelist se houver)
                 mapping_count = 0
                 for site in sites:
-                    site_id = site.get("name")  # Campo 'name' = ID do site
+                    slug = site.get("name")  # Campo 'name' = slug usado nos paths da API
                     display_name = site.get("desc")  # Campo 'desc' = nome legível
+                    object_id = site.get("_id")  # ObjectId real do site
 
-                    if not site_id or not display_name:
-                        logger.warning(f"Site sem ID ou nome: {site}")
+                    if not slug or not display_name:
+                        logger.warning("Site sem slug ou display name; ignorado")
                         continue
 
-                    # SEGURANÇA: Apenas mapear sites na whitelist quando houver
+                    # Todos os sites do controlador, para classificar 404 vs 403.
+                    self._all_site_name_to_id[display_name] = slug
+
+                    # SEGURANÇA: Apenas expor sites na whitelist quando houver
                     if allowed_sites is not None and display_name not in allowed_sites:
-                        logger.debug(f"Site '{display_name}' ignorado (não está na whitelist)")
+                        logger.debug(f"Site '{display_name}' fora da whitelist (existe, não exposto)")
                         continue
 
-                    self._site_name_to_id[display_name] = site_id
+                    self._site_name_to_id[display_name] = slug
+                    self._sites_by_slug[slug] = {
+                        "_id": object_id or slug,
+                        "name": slug,
+                        "desc": display_name,
+                    }
                     mapping_count += 1
-                    logger.info(f"Mapeado: '{display_name}' → '{site_id}'")
+                    logger.info(f"Mapeado: '{display_name}' → '{slug}'")
 
                 logger.info(f"Mapeamento NAME→ID carregado: {mapping_count} sites permitidos" if allowed_sites else f"Mapeamento NAME→ID carregado: {mapping_count} sites (ALL-SITES)")
 
@@ -508,11 +572,81 @@ class ConnectionManager:
         self._last_cache_update = {}
         logger.info("Unifi connection manager resources cleared.")
 
-    async def request(self, api_request: ApiRequest | ApiRequestV2, return_raw: bool = False) -> Any:
-        """Make a request to the controller API, handling raw responses."""
+    # --- Site scoping -----------------------------------------------------
+
+    def _apply_site(self, slug: str) -> None:
+        """Point the controller at `slug` without touching the cache.
+
+        Deliberately does NOT invalidate the cache: every cache key already
+        carries the target site, so wiping it on each swap only destroys
+        useful entries. Only `set_site()` (an explicit, durable change of the
+        default site) invalidates.
+        """
+        if self.controller and hasattr(self.controller.connectivity, "config"):
+            self.controller.connectivity.config.site = slug
+        self.site = slug
+
+    def resolve_slug(self, site: Optional[str]) -> Optional[str]:
+        """Translate a display name into the slug the API path needs.
+
+        Accepts a slug already (returned unchanged) or a display name from the
+        whitelist. Unknown values pass through so the caller's own validation
+        produces the error, not this helper.
+        """
+        if not site:
+            return None
+        if site in self._site_name_to_id:
+            return self._site_name_to_id[site]
+        return site
+
+    def site_exists_on_controller(self, site: str) -> bool:
+        """True when `site` exists on the controller, whitelisted or not.
+
+        Used to tell "site does not exist" (404) apart from "site exists but is
+        not allowed" (403). Does not reveal the non-whitelisted names.
+        """
+        if site in self._sites_by_slug or site in self._site_name_to_id:
+            return True
+        if site in self._all_site_name_to_id:
+            return True
+        return site in set(self._all_site_name_to_id.values())
+
+    async def request(
+        self,
+        api_request: ApiRequest | ApiRequestV2,
+        return_raw: bool = False,
+        site: Optional[str] = None,
+    ) -> Any:
+        """Make a request to the controller API, optionally scoped to a site.
+
+        Args:
+            api_request: The aiounifi request object.
+            return_raw: Return the full envelope ({"meta", "data"}) instead of
+                just the `data` payload.
+            site: Slug (or whitelisted display name) to run this single request
+                against. The previous site is always restored, including on
+                error, and the whole request is serialised so a concurrent call
+                cannot observe the swapped site.
+        """
         if not await self.ensure_connected() or not self.controller:
             raise ConnectionError("Unifi Controller is not connected.")
 
+        target_slug = self.resolve_slug(site)
+
+        async with self._request_lock:
+            previous_site = self.site
+            swapped = False
+            if target_slug and target_slug != previous_site:
+                self._apply_site(target_slug)
+                swapped = True
+            try:
+                return await self._request_locked(api_request, return_raw)
+            finally:
+                if swapped:
+                    self._apply_site(previous_site)
+
+    async def _request_locked(self, api_request: ApiRequest | ApiRequestV2, return_raw: bool = False) -> Any:
+        """Perform the request. Caller holds `_request_lock` and owns site state."""
         # Apply override if we have better detection (FR-003: use cached detection)
         original_is_unifi_os = None
         if self._unifi_os_override is not None:
@@ -523,7 +657,11 @@ class ConnectionManager:
                 )
                 self.controller.connectivity.is_unifi_os = self._unifi_os_override
 
-        request_method = self.controller.connectivity._request if return_raw else self.controller.request
+        # `controller.request` already returns the full envelope ({"meta", "data"}).
+        # `return_raw` therefore only decides whether we unwrap it -- the old code
+        # called `connectivity._request`, whose signature is (method, url, ...) and
+        # which raised TypeError for every caller that asked for a raw response.
+        request_method = self.controller.request
 
         try:
             # Diagnostics: capture timing and payloads without leaking secrets
@@ -548,7 +686,7 @@ class ConnectionManager:
                     )
             except Exception:
                 pass
-            return response if return_raw else response.get("data")
+            return response if return_raw else (response or {}).get("data")
 
         except LoginRequired:
             logger.warning("Login required detected during request, attempting re-login...")
@@ -578,7 +716,7 @@ class ConnectionManager:
                             )
                     except Exception:
                         pass
-                    return retry_response if return_raw else retry_response.get("data")
+                    return retry_response if return_raw else (retry_response or {}).get("data")
                 except Exception as retry_e:
                     logger.error(
                         f"API request failed even after re-login: {api_request.method.upper()} {api_request.path} - {retry_e}"
@@ -588,6 +726,11 @@ class ConnectionManager:
                 raise ConnectionError("Re-login failed, cannot proceed with request.")
         except (RequestError, ResponseError, aiohttp.ClientError) as e:
             logger.error(f"API request error: {api_request.method.upper()} {api_request.path} - {e}")
+            reason = _controller_reason(e)
+            if reason:
+                raise ControllerRefusedError(
+                    f"{api_request.method.upper()} {api_request.path}", reason, site=self.site
+                ) from e
             try:
                 from src.utils.diagnostics import diagnostics_enabled, log_api_request
 
@@ -609,6 +752,11 @@ class ConnectionManager:
                 f"Unexpected error during API request: {api_request.method.upper()} {api_request.path} - {e}",
                 exc_info=True,
             )
+            reason = _controller_reason(e)
+            if reason:
+                raise ControllerRefusedError(
+                    f"{api_request.method.upper()} {api_request.path}", reason, site=self.site
+                ) from e
             try:
                 from src.utils.diagnostics import diagnostics_enabled, log_api_request
 
@@ -629,6 +777,63 @@ class ConnectionManager:
             # Always restore original value (FR-003: maintain session state)
             if original_is_unifi_os is not None:
                 self.controller.connectivity.is_unifi_os = original_is_unifi_os
+
+    async def request_unsited(
+        self,
+        path: str,
+        method: str = "get",
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Call a controller-level endpoint, i.e. one that is not under a site.
+
+        `ApiRequest.full_path()` unconditionally prefixes `/api/s/<site>`, so a
+        controller-level path handed to `request()` becomes
+        `/api/s/default/api/self/sites` and the controller answers
+        `api.err.InvalidObject`. That error was previously read as "aiounifi
+        cannot call this endpoint"; the endpoint is fine, the path was being
+        built wrong.
+
+        Applies to `/api/self/sites`, `/api/stat/admin` and `/status`.
+        """
+        if not await self.ensure_connected() or not self._aiohttp_session:
+            raise ConnectionError("Unifi Controller is not connected.")
+
+        prefix = "/proxy/network" if self._unifi_os_override else ""
+        url = f"{self.url_base}{prefix}{path}"
+        async with self._aiohttp_session.request(method.upper(), url, json=data) as response:
+            if response.status != 200:
+                raise ResponseError(f"Call {url} received {response.status}")
+            payload = await response.json()
+        return payload.get("data") if isinstance(payload, dict) else payload
+
+    async def request_bytes(
+        self,
+        path: str,
+        method: str = "post",
+        data: Optional[Dict[str, Any]] = None,
+        site: Optional[str] = None,
+    ) -> Optional[bytes]:
+        """Fetch a binary body (e.g. a controller backup) from a site path.
+
+        aiounifi decodes a response only when its content type is JSON, so a
+        binary download through `request()` silently yields an empty dict. This
+        goes straight to the session instead.
+        """
+        if not await self.ensure_connected() or not self._aiohttp_session:
+            raise ConnectionError("Unifi Controller is not connected.")
+
+        target_slug = self.resolve_slug(site) or self.site
+        prefix = "/proxy/network" if self._unifi_os_override else ""
+        url = f"{self.url_base}{prefix}/api/s/{target_slug}{path}"
+        try:
+            async with self._aiohttp_session.request(method.upper(), url, json=data) as response:
+                if response.status != 200:
+                    logger.error(f"Binary request {method.upper()} {path} failed: HTTP {response.status}")
+                    return None
+                return await response.read()
+        except Exception as e:
+            logger.error(f"Binary request {method.upper()} {path} failed: {e}")
+            return None
 
     # --- Cache Management ---
 
@@ -682,8 +887,8 @@ class ConnectionManager:
         CRÍTICO: Este método agora aceita display name e resolve para site ID automaticamente.
 
         Args:
-            site: Display name do site (ex: 'SK_PMW_SkillsIT-Escritorio')
-                  ou site ID direto (ex: 'i06j58bm')
+            site: Display name do site (ex: 'Grupo Acme')
+                  ou site ID direto (ex: 'grupoacme')
 
         Fluxo:
         1. Verifica se 'site' é um display name no mapeamento
@@ -698,19 +903,11 @@ class ConnectionManager:
             logger.warning("Cannot set site dynamically, controller or config not available.")
             return
 
-        # CRÍTICO: Resolver display name → site ID
-        site_id = site  # Default: assumir que já é ID
+        # CRÍTICO: Resolver display name → site slug
+        site_id = self.resolve_slug(site) or site
+        if site_id != site:
+            logger.info(f"Resolvido display name '{site}' → slug '{site_id}'")
 
-        if site in self._site_name_to_id:
-            # É um display name - resolver para ID
-            site_id = self._site_name_to_id[site]
-            logger.info(f"Resolvido display name '{site}' → site ID '{site_id}'")
-        else:
-            # Não está no mapeamento - pode ser ID direto ou site inválido
-            logger.debug(f"Site '{site}' não encontrado no mapeamento NAME→ID, assumindo que é site ID direto")
-
-        # Aplicar site ID no controller
-        self.controller.connectivity.config.site = site_id
-        self.site = site_id
+        self._apply_site(site_id)
         self._invalidate_cache()
-        logger.info(f"Site alvo alterado para ID '{site_id}'. Cache invalidado. Re-login pode ocorrer no próximo request.")
+        logger.info(f"Site padrão alterado para '{site_id}'. Cache invalidado.")

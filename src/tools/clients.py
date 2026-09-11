@@ -37,7 +37,7 @@ async def lookup_by_ip(ip_address: str, site: Optional[str] = None) -> Dict[str,
     try:
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
 
-        client_obj = await client_manager.get_client_by_ip(ip_address)
+        client_obj = await client_manager.get_client_by_ip(ip_address, site=site_slug)
         if client_obj:
             client_raw = client_obj.raw if hasattr(client_obj, "raw") else client_obj
             return inject_site_metadata(
@@ -101,7 +101,7 @@ async def list_clients(
 
         # Warn about high token usage
         if include_details and not summary:
-            logger.warning("⚠️ High token usage: include_details=True without summary mode")
+            logger.warning("High token usage: include_details=True without summary mode")
 
         # Resolve site context and get metadata
         site_id, site_name, site_slug = await resolve_site_context(site, system_manager)
@@ -111,8 +111,9 @@ async def list_clients(
         # Convert Client objects to plain dictionaries
         clients_raw = [c.raw if hasattr(c, "raw") else c for c in clients]
 
-        # Apply limit early to save processing
+        total_found = len(clients_raw)
         clients_raw = clients_raw[:limit]
+        truncated = total_found > limit
 
         # Optimized client data based on summary mode
         if summary:
@@ -144,7 +145,8 @@ async def list_clients(
             "success": True,
             "active_only": active_only,
             "count": len(clients_optimized),
-            "total_found": len(clients_raw),
+            "total_found": total_found,
+            "truncated": truncated,
             "clients": clients_optimized,
             "filters": {
                 "active_only": active_only,
@@ -316,7 +318,7 @@ async def block_client(mac_address: str, confirm: bool = False, site: Optional[s
         SiteForbiddenError: Access to site denied by whitelist
         InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "client", "block"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for blocking client ({mac_address}).")
         return {"success": False, "error": "Permission denied to block clients."}
 
@@ -407,7 +409,7 @@ async def unblock_client(mac_address: str, confirm: bool = False, site: Optional
         SiteForbiddenError: Access to site denied by whitelist
         InvalidSiteParameterError: Site parameter validation failed
     """
-    if not parse_permission(config.permissions, "client", "unblock"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for unblocking client ({mac_address}).")
         return {"success": False, "error": "Permission denied to unblock clients."}
 
@@ -482,7 +484,7 @@ async def rename_client(
     mac_address: str, name: str, confirm: bool = False, site: Optional[str] = None
 ) -> Dict[str, Any]:
     """Implementation for renaming a client with multi-site support."""
-    if not parse_permission(config.permissions, "client", "update"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for renaming client ({mac_address}).")
         return {"success": False, "error": "Permission denied to rename clients."}
 
@@ -555,7 +557,7 @@ async def rename_client(
 )
 async def force_reconnect_client(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
     """Implementation for forcing a client to reconnect with multi-site support."""
-    if not parse_permission(config.permissions, "client", "reconnect"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for forcing reconnect of client ({mac_address}).")
         return {
             "success": False,
@@ -640,7 +642,7 @@ async def authorize_guest(
     site: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Implementation for authorizing a guest with multi-site support."""
-    if not parse_permission(config.permissions, "client", "authorize"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for authorizing guest ({mac_address}).")
         return {"success": False, "error": "Permission denied to authorize guests."}
 
@@ -732,7 +734,7 @@ async def authorize_guest(
 )
 async def unauthorize_guest(mac_address: str, confirm: bool = False, site: Optional[str] = None) -> Dict[str, Any]:
     """Implementation for unauthorizing a guest with multi-site support."""
-    if not parse_permission(config.permissions, "client", "authorize"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for unauthorizing guest ({mac_address}).")
         return {"success": False, "error": "Permission denied to unauthorize guests."}
 
@@ -821,7 +823,7 @@ async def set_client_ip_settings(
     site: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Set fixed IP and/or local DNS record for a client with multi-site support."""
-    if not parse_permission(config.permissions, "client", "update"):
+    if not parse_permission(config.permissions, "clients", "update"):
         logger.warning(f"Permission denied for setting IP settings ({mac_address}).")
         return {
             "success": False,
