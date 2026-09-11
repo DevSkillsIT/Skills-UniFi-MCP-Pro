@@ -1464,7 +1464,7 @@
       }
     },
     {
-      "description": "A\u00e7\u00f5es de gerenciamento sobre um equipamento UniFi Network \u2014 reiniciar, adotar, renomear, piscar o LED de localiza\u00e7\u00e3o, atualizar firmware e configurar o r\u00e1dio de um access point com canal, largura de canal e pot\u00eancia de transmiss\u00e3o manuais. Use quando precisar agir sobre um dispositivo espec\u00edfico em vez de apenas consult\u00e1-lo. Cada a\u00e7\u00e3o exige o endere\u00e7o MAC do equipamento e a a\u00e7\u00e3o desejada; reiniciar, adotar e atualizar firmware exigem confirm=true expl\u00edcito por serem imediatas e irrevers\u00edveis no controlador UniFi.",
+      "description": "A\u00e7\u00f5es de gerenciamento sobre um equipamento UniFi Network \u2014 reiniciar, adotar, renomear, piscar o LED de localiza\u00e7\u00e3o, atualizar firmware, configurar o r\u00e1dio de um access point (canal, largura e pot\u00eancia manuais) e configurar uma porta de switch (nome, PoE, VLAN nativa, perfil de porta, habilita\u00e7\u00e3o). Use quando precisar agir sobre um dispositivo espec\u00edfico em vez de apenas consult\u00e1-lo. Cada a\u00e7\u00e3o exige o endere\u00e7o MAC do equipamento e a a\u00e7\u00e3o desejada; reiniciar, adotar e atualizar firmware exigem confirm=true expl\u00edcito por serem imediatas e irrevers\u00edveis no controlador UniFi.",
       "name": "unifi_manage_device",
       "schema": {
         "input": {
@@ -1491,6 +1491,12 @@
               "type": "string"
             },
             "name": {
+              "type": "string"
+            },
+            "port_idx": {
+              "type": "string"
+            },
+            "port_settings": {
               "type": "string"
             },
             "site": {
@@ -1778,7 +1784,7 @@
       }
     },
     {
-      "description": "Atualiza\u00e7\u00e3o de rede UniFi Network via ID \u2014 modifica\u00e7\u00e3o de nome, subnet, VLAN ID, gateway ou configura\u00e7\u00e3o DHCP com confirma\u00e7\u00e3o obrigat\u00f3ria. Use quando precisar ajustar network, modificar VLAN ou alterar endere\u00e7amento. Executa update parcial de configura\u00e7\u00e3o de rede no controlador UniFi com suporte multi-site.",
+      "description": "Atualiza\u00e7\u00e3o de rede UniFi Network via ID com confirma\u00e7\u00e3o obrigat\u00f3ria \u2014 aceita qualquer campo do objeto de rede do controlador: nome, subnet, VLAN, faixa e op\u00e7\u00f5es de DHCP, servidores DNS, dom\u00ednio, IGMP snooping, DHCP guard, mDNS e isolamento de rede. Chame unifi_get_network_details antes para ver os nomes e os valores atuais. Use quando precisar ajustar uma rede, mudar VLAN ou alterar endere\u00e7amento. Responde dizendo campo a campo o que o controlador gravou e o que ele ignorou.",
       "name": "unifi_update_network",
       "schema": {
         "input": {
@@ -1995,7 +2001,7 @@
       }
     },
     {
-      "description": "Atualiza\u00e7\u00e3o de rede wireless UniFi Network via ID com confirma\u00e7\u00e3o obrigat\u00f3ria \u2014 modifica nome do SSID, senha, modo de seguran\u00e7a, estado de habilita\u00e7\u00e3o, VLAN associada ou grupo de usu\u00e1rios. Use quando precisar ajustar uma WLAN, trocar a senha do WiFi ou alterar a criptografia. Aplica a altera\u00e7\u00e3o no site indicado e rel\u00ea a configura\u00e7\u00e3o gravada no controlador UniFi.",
+      "description": "Atualiza\u00e7\u00e3o de rede wireless UniFi Network via ID com confirma\u00e7\u00e3o obrigat\u00f3ria \u2014 aceita QUALQUER campo do objeto WLAN do controlador, n\u00e3o apenas nome, senha e seguran\u00e7a: taxa m\u00ednima de transmiss\u00e3o (minrate_*), filtro de broadcast, isolamento L2, DTIM, assistente de roaming, banda do SSID, PMF, fast roaming, filtro de MAC, agendamento e grupos de AP. Chame unifi_get_wlan_details antes para ver os nomes e os valores atuais de todos os campos. Use quando precisar ajustar qualquer aspecto de uma WLAN. Responde dizendo campo a campo o que o controlador gravou e o que ele ignorou, porque ele aceita nome de campo desconhecido sem reclamar.",
       "name": "unifi_update_wlan",
       "schema": {
         "input": {

@@ -19,6 +19,7 @@ from src.runtime import config, network_manager, server, system_manager
 from src.utils.confirmation import create_preview, should_auto_confirm, update_preview
 from src.utils.permissions import parse_permission
 from src.utils.site_context import inject_site_metadata, resolve_site_context
+from src.utils.write_verification import verify_write
 from src.validator_registry import UniFiValidatorRegistry
 
 logger = logging.getLogger(__name__)
@@ -139,7 +140,7 @@ async def get_network_details(network_id: str, site: Optional[str] = None) -> Di
 
 @server.tool(
     name="unifi_update_network",
-    description="Atualização de rede UniFi Network via ID — modificação de nome, subnet, VLAN ID, gateway ou configuração DHCP com confirmação obrigatória. Use quando precisar ajustar network, modificar VLAN ou alterar endereçamento. Executa update parcial de configuração de rede no controlador UniFi com suporte multi-site.",
+    description="Atualização de rede UniFi Network via ID com confirmação obrigatória — aceita qualquer campo do objeto de rede do controlador: nome, subnet, VLAN, faixa e opções de DHCP, servidores DNS, domínio, IGMP snooping, DHCP guard, mDNS e isolamento de rede. Chame unifi_get_network_details antes para ver os nomes e os valores atuais. Use quando precisar ajustar uma rede, mudar VLAN ou alterar endereçamento. Responde dizendo campo a campo o que o controlador gravou e o que ele ignorou.",
     permission_category="networks",
     permission_action="update",
 )
@@ -209,13 +210,13 @@ async def update_network(
         # Perform the update
         success = await network_manager.update_network(network_id, validated_data, site=site_slug)
         if success:
-            # Fetch updated details
             updated = await network_manager.get_network_details(network_id, site=site_slug)
             return inject_site_metadata(
                 {
                     "success": True,
                     "network_id": network_id,
-                    "updated_fields": list(validated_data.keys()),
+                    "requested_fields": list(validated_data.keys()),
+                    **verify_write(validated_data, updated, before=current),
                     "details": updated,
                 },
                 site_id,
@@ -414,7 +415,7 @@ async def get_wlan_details(wlan_id: str, site: Optional[str] = None) -> Dict[str
 
 @server.tool(
     name="unifi_update_wlan",
-    description="Atualização de rede wireless UniFi Network via ID com confirmação obrigatória — modifica nome do SSID, senha, modo de segurança, estado de habilitação, VLAN associada ou grupo de usuários. Use quando precisar ajustar uma WLAN, trocar a senha do WiFi ou alterar a criptografia. Aplica a alteração no site indicado e relê a configuração gravada no controlador UniFi.",
+    description="Atualização de rede wireless UniFi Network via ID com confirmação obrigatória — aceita QUALQUER campo do objeto WLAN do controlador, não apenas nome, senha e segurança: taxa mínima de transmissão (minrate_*), filtro de broadcast, isolamento L2, DTIM, assistente de roaming, banda do SSID, PMF, fast roaming, filtro de MAC, agendamento e grupos de AP. Chame unifi_get_wlan_details antes para ver os nomes e os valores atuais de todos os campos. Use quando precisar ajustar qualquer aspecto de uma WLAN. Responde dizendo campo a campo o que o controlador gravou e o que ele ignorou, porque ele aceita nome de campo desconhecido sem reclamar.",
     permission_category="wlans",
     permission_action="update",
 )
@@ -425,11 +426,42 @@ async def update_wlan(
 
     Args:
         wlan_id: The WLAN `_id` on the target site.
-        update_data: Fields to change. The controller replaces the whole object
-            on write, so the manager merges these onto the current definition.
+        update_data: Fields to change. Any field of the controller's WLAN object
+            is accepted, not only the handful the schema names; call
+            `unifi_get_wlan_details` to read the current object and take the
+            exact field names from it.
+
+            Field families that are settable and frequently needed:
+
+            - Identity and access: `name`, `x_passphrase`, `security`,
+              `wpa_mode`, `wpa3_support`, `pmf_mode`, `hide_ssid`, `enabled`
+            - Placement: `networkconf_id` (VLAN), `usergroup_id`,
+              `ap_group_ids`, `wlan_band` ("2g", "5g", "both")
+            - Airtime and density: `minrate_setting_preference`,
+              `minrate_ng_enabled`, `minrate_ng_data_rate_kbps`,
+              `minrate_na_enabled`, `minrate_na_data_rate_kbps`,
+              `bc_filter_enabled`, `mcastenhance_enabled`, `dtim_mode`,
+              `dtim_ng`, `dtim_na`
+            - Roaming: `fast_roaming_enabled`, `bss_transition`,
+              `roaming_assistant_*` (a minimum-RSSI that disconnects clients
+              below the threshold)
+            - Isolation and filtering: `l2_isolation`, `proxy_arp`,
+              `mac_filter_enabled`, `mac_filter_policy`, `mac_filter_list`
+            - Scheduling: `schedule_with_duration`
+
+            One dependency is not obvious and the controller does not report it:
+            `minrate_*_data_rate_kbps` is clamped to a default unless
+            `minrate_setting_preference` is set to "manual" in the same call.
+
         confirm: Must be True to apply; otherwise a preview is returned.
         site: Site slug or display name. This is a write: passing the wrong
             site changes the wrong network, so it is resolved and reported.
+
+    Returns:
+        `applied` names each requested field the controller is now holding and
+        `ignored` each one it is not. A field lands in `ignored` when its name is
+        misspelled, when it is not settable on this object, or when the
+        controller clamped the value -- all three of which it reports as success.
     """
     if not parse_permission(config.permissions, "wlans", "update"):
         logger.warning(f"Permission denied for updating WLAN ({wlan_id}).")
@@ -485,13 +517,16 @@ async def update_wlan(
             )
 
         # Read back rather than echo the request: the controller is the authority
-        # on what was actually stored.
+        # on what was actually stored, and it answers rc=ok for a field name it
+        # does not recognise.
         updated_wlan = await network_manager.get_wlan_details(wlan_id, site=site_slug)
+        verification = verify_write(validated_data, updated_wlan, before=current)
         return inject_site_metadata(
             {
                 "success": True,
                 "wlan_id": wlan_id,
-                "updated_fields": updated_fields_list,
+                "requested_fields": updated_fields_list,
+                **verification,
                 "details": json.loads(json.dumps(updated_wlan, default=str)),
             },
             site_id,

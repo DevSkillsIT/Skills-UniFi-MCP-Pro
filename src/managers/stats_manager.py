@@ -319,7 +319,11 @@ class StatsManager(SiteScopedManager):
                 r.get("name"): r for r in (device.get("radio_table_stats") or []) if isinstance(r, dict)
             }
             snapshot["radios"] = [
-                radio_view(config, live_by_name.get(config.get("name"), {}))
+                radio_view(
+                    config,
+                    live_by_name.get(config.get("name"), {}),
+                    provisioned_at=device.get("provisioned_at"),
+                )
                 for config in (device.get("radio_table") or [])
                 if isinstance(config, dict)
             ]

@@ -5,7 +5,7 @@ statistics -- and a projection written twice drifts: the fix lands on one and
 the other keeps reporting the old, thinner view.
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 RADIO_BAND_LABELS = {"ng": "2.4GHz", "na": "5GHz", "6e": "6GHz", "ax": "6GHz"}
 
@@ -29,7 +29,58 @@ def _safe_float(value: Any):
         return None
 
 
-def radio_view(config: Dict[str, Any], live: Dict[str, Any]) -> Dict[str, Any]:
+# A radio adopts a freshly written power on its next provision. Past this many
+# seconds since the device last provisioned, a difference is no longer pending.
+PROVISION_SETTLE_SECONDS = 600
+
+
+def _power_status(config: Dict[str, Any], live: Dict[str, Any], provisioned_at: Optional[int]) -> Optional[str]:
+    """Explain a configured power the radio is not transmitting at.
+
+    Only meaningful under `custom`: in `auto` the controller picks the power and
+    `radio_table.tx_power` holds whatever was last written by hand, which the
+    radio is correctly ignoring.
+
+    The distinction that matters is pending versus capped, and the device's own
+    `provisioned_at` settles it. Reporting only the live figure makes a setting
+    that was applied look like a setting that was ignored -- and reporting only
+    the configured figure makes a power the radio refuses look like a power it
+    is using.
+    """
+    if config.get("tx_power_mode") != "custom":
+        return None
+    configured = _safe_int(config.get("tx_power"))
+    actual = _safe_int(live.get("tx_power"))
+    if not configured or not actual or configured == actual:
+        return None
+
+    settled = None
+    if provisioned_at:
+        import time
+
+        settled = (time.time() - provisioned_at) > PROVISION_SETTLE_SECONDS
+
+    if settled is True:
+        return (
+            f"Configured for {configured} dBm and transmitting at {actual} dBm, with the device "
+            f"provisioned long enough ago for the setting to have taken. The radio is capping it: "
+            f"{configured} dBm will not be reached on this band. `max_txpower` is what the hardware "
+            f"supports, not what the regulatory domain permits per band."
+        )
+    if settled is False:
+        return (
+            f"Configured for {configured} dBm, transmitting at {actual} dBm. The device provisioned "
+            f"recently; the radio may still be adopting the value."
+        )
+    return (
+        f"Configured for {configured} dBm, transmitting at {actual} dBm. Whether the radio is still "
+        f"adopting it or capping it cannot be told without the device's provisioning time."
+    )
+
+
+def radio_view(
+    config: Dict[str, Any], live: Dict[str, Any], provisioned_at: Optional[int] = None
+) -> Dict[str, Any]:
     """Everything the controller knows about one radio, in one object.
 
     The two tables answer different questions and neither is sufficient:
@@ -76,11 +127,17 @@ def radio_view(config: Dict[str, Any], live: Dict[str, Any]) -> Dict[str, Any]:
         # Width: configured, and in use.
         "channel_width_mhz": _safe_int(live.get("bw")) or config.get("ht"),
         "channel_width_configured_mhz": config.get("ht"),
-        # Power.
+        # Power, intent beside outcome -- the same split as channel and width.
+        # A radio can carry a configured power it is not yet transmitting at:
+        # the value is stored the moment it is written, while the radio only
+        # adopts it once it re-provisions. Reporting the live figure alone makes
+        # a setting that was applied look like a setting that was ignored.
         "tx_power_dbm": _safe_int(live.get("tx_power")),
+        "tx_power_configured_dbm": _safe_int(config.get("tx_power")) or None,
         "tx_power_mode": config.get("tx_power_mode"),
         "tx_power_min_dbm": config.get("min_txpower"),
         "tx_power_max_dbm": config.get("max_txpower"),
+        "tx_power_status": _power_status(config, live, provisioned_at),
         "antenna_gain_dbi": config.get("antenna_gain"),
         # Airtime: whose it is.
         "utilization_total_percent": total,

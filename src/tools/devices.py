@@ -22,7 +22,7 @@ from src.utils.site_context import inject_site_metadata, resolve_site_context
 
 logger = logging.getLogger(__name__)
 
-DEVICE_ACTIONS = frozenset({"reboot", "adopt", "rename", "locate", "upgrade", "set_radio"})
+DEVICE_ACTIONS = frozenset({"reboot", "adopt", "rename", "locate", "upgrade", "set_radio", "set_port"})
 
 # Folding several operations behind one tool must not quietly widen what the
 # permission file allows. The decorator gates registration on devices/update;
@@ -50,6 +50,10 @@ DEVICE_ACTION_CONSEQUENCES = {
     ],
     "rename": ["Only the label changes; the device keeps running."],
     "locate": ["Only the locate LED changes; the device keeps running."],
+    "set_port": [
+        "Anything connected to that port may lose link while it re-provisions.",
+        "Turning PoE off powers down whatever the port feeds.",
+    ],
 }
 
 def get_wifi_bands(device_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -64,7 +68,11 @@ def get_wifi_bands(device_raw: Dict[str, Any]) -> List[Dict[str, Any]]:
         if isinstance(radio, dict)
     }
     return [
-        radio_view(config, live_by_name.get(config.get("name"), {}))
+        radio_view(
+            config,
+            live_by_name.get(config.get("name"), {}),
+            provisioned_at=device_raw.get("provisioned_at"),
+        )
         for config in (device_raw.get("radio_table") or [])
         if isinstance(config, dict)
     ]
@@ -244,8 +252,36 @@ async def get_device_details(mac_address: str, site: Optional[str] = None) -> Di
             device_info["wifi_bands"] = get_wifi_bands(device_raw)
             device_info["broadcast_ssids"] = get_broadcast_ssids(device_raw)
         elif device_raw.get("type", "").startswith(("usw", "usk")):  # Switches
-            device_info["ports_total"] = len(device_raw.get("port_table", []))
-            device_info["ports_up"] = len([p for p in device_raw.get("port_table", []) if p.get("up", False)])
+            ports = device_raw.get("port_table") or []
+            overrides = {
+                o.get("port_idx"): o for o in (device_raw.get("port_overrides") or []) if isinstance(o, dict)
+            }
+            device_info["ports_total"] = len(ports)
+            device_info["ports_up"] = len([p for p in ports if p.get("up", False)])
+            # The per-port view carries the field names `unifi_manage_device`
+            # with action="set_port" writes, so they never have to be guessed.
+            device_info["switch_ports"] = [
+                {
+                    "port_idx": p.get("port_idx"),
+                    "name": p.get("name"),
+                    "up": p.get("up"),
+                    "enable": p.get("enable"),
+                    "speed_mbps": p.get("speed"),
+                    "is_uplink": p.get("is_uplink"),
+                    "poe_enabled": p.get("poe_enable"),
+                    "poe_mode": p.get("poe_mode"),
+                    "poe_power_w": p.get("poe_power"),
+                    "poe_class": p.get("pd_class"),
+                    "native_networkconf_id": p.get("native_networkconf_id"),
+                    "portconf_id": p.get("portconf_id"),
+                    "rx_bytes": p.get("rx_bytes"),
+                    "tx_bytes": p.get("tx_bytes"),
+                    "rx_errors": p.get("rx_errors"),
+                    "tx_errors": p.get("tx_errors"),
+                    "override": overrides.get(p.get("port_idx")),
+                }
+                for p in ports
+            ]
         elif device_raw.get("type", "").startswith(("ugw", "udm", "uxg")):  # Gateways
             device_info["wan_ip"] = device_raw.get("wan_ip", "N/A")
             device_info["uptime"] = device_raw.get("uptime", 0)
@@ -276,7 +312,7 @@ async def get_device_details(mac_address: str, site: Optional[str] = None) -> Di
 
 @server.tool(
     name="unifi_manage_device",
-    description="Ações de gerenciamento sobre um equipamento UniFi Network — reiniciar, adotar, renomear, piscar o LED de localização, atualizar firmware e configurar o rádio de um access point com canal, largura de canal e potência de transmissão manuais. Use quando precisar agir sobre um dispositivo específico em vez de apenas consultá-lo. Cada ação exige o endereço MAC do equipamento e a ação desejada; reiniciar, adotar e atualizar firmware exigem confirm=true explícito por serem imediatas e irreversíveis no controlador UniFi.",
+    description="Ações de gerenciamento sobre um equipamento UniFi Network — reiniciar, adotar, renomear, piscar o LED de localização, atualizar firmware, configurar o rádio de um access point (canal, largura e potência manuais) e configurar uma porta de switch (nome, PoE, VLAN nativa, perfil de porta, habilitação). Use quando precisar agir sobre um dispositivo específico em vez de apenas consultá-lo. Cada ação exige o endereço MAC do equipamento e a ação desejada; reiniciar, adotar e atualizar firmware exigem confirm=true explícito por serem imediatas e irreversíveis no controlador UniFi.",
     permission_category="devices",
     permission_action="update",
 )
@@ -285,6 +321,8 @@ async def manage_device(
     action: str,
     name: Optional[str] = None,
     band: Optional[str] = None,
+    port_idx: Optional[int] = None,
+    port_settings: Optional[Dict[str, Any]] = None,
     channel: Optional[Any] = None,
     channel_width: Optional[int] = None,
     tx_power_mode: Optional[str] = None,
@@ -302,6 +340,12 @@ async def manage_device(
         name: New device name. Required for `rename`.
         band: Radio to configure: "2.4GHz", "5GHz" or "6GHz". Required for
             `set_radio`.
+        port_idx: Physical switch port number. Required for `set_port`.
+        port_settings: Fields to set on that port, for example `name`,
+            `poe_mode` ("auto", "off", "pasv24", "passthrough"), `enable`,
+            `native_networkconf_id` (untagged VLAN), `portconf_id` (port
+            profile), `isolation`, `autoneg`, `speed`. Read the current values
+            with `unifi_get_device_details`, whose `switch_ports` lists them.
         channel: Channel number, or "auto" to return the choice to the
             controller. Validated against what the site's regulatory domain
             permits at the chosen width.
@@ -372,6 +416,20 @@ async def manage_device(
         elif action_normalised == "locate":
             succeeded = await device_manager.locate_device(mac_address, enable=enable, site=site_slug)
             result = {"success": succeeded, "action": "locate", "flashing": enable}
+        elif action_normalised == "set_port":
+            if port_idx is None:
+                return {"success": False, "error": "set_port requires the 'port_idx' parameter."}
+            if not port_settings:
+                return {"success": False, "error": "set_port requires the 'port_settings' parameter."}
+            outcome = await device_manager.set_port_override(
+                mac_address, port_idx=port_idx, settings=port_settings, site=site_slug
+            )
+            result = {"success": not outcome["ignored"], "action": "set_port", **outcome}
+            if outcome["ignored"]:
+                result["error"] = (
+                    "The controller is not holding every requested field. A field it does not "
+                    "recognise is accepted without complaint and stored nowhere."
+                )
         elif action_normalised == "set_radio":
             if not band:
                 return {"success": False, "error": "set_radio requires the 'band' parameter (2.4GHz, 5GHz or 6GHz)."}

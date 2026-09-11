@@ -6,6 +6,7 @@ and a call that did land went to whichever site the shared connection was
 pointing at -- a reboot aimed at the wrong site.
 """
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,7 @@ from .base_manager import SiteScopedManager
 logger = logging.getLogger("unifi-network-mcp")
 
 CACHE_PREFIX_DEVICES = "devices"
+SWITCH_TYPES = ("usw", "usk")
 
 
 class DeviceManager(SiteScopedManager):
@@ -286,3 +288,96 @@ class DeviceManager(SiteScopedManager):
         self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
         logger.info(f"Radio {radio_code} of {device_mac} changed on {self._target_site(site)}: {changed}")
         return {"changed": changed, "before": before, "after": after, "applied": True}
+
+    # --- Switch ports -----------------------------------------------------
+
+    # A device write is visible on /stat/device only after the controller
+    # refreshes it; the PUT response body does not carry the stored object. A
+    # read taken immediately reports a successful write as failed.
+    WRITE_SETTLE_SECONDS = 3.0
+
+    async def get_port_overrides(self, device_mac: str, site: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Per-port configuration currently overriding the switch defaults."""
+        device = await self.get_device_details(device_mac, site=site)
+        if not device:
+            return []
+        raw = device.raw if hasattr(device, "raw") else device
+        return [o for o in (raw.get("port_overrides") or []) if isinstance(o, dict)]
+
+    async def set_port_override(
+        self,
+        device_mac: str,
+        port_idx: int,
+        settings: Dict[str, Any],
+        site: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Change the configuration of one switch port.
+
+        The controller replaces the whole `port_overrides` array on write, so
+        the existing entries are read, the one for this port is merged or
+        appended, and the complete array is sent back. Sending only the changed
+        port would silently clear every other port's configuration.
+
+        Args:
+            device_mac: MAC, `_id` or name of the switch.
+            port_idx: Physical port number, as printed on the device.
+            settings: Fields to set on that port, for example `name`,
+                `poe_mode` ("auto", "off", "pasv24", "passthrough"), `enable`,
+                `native_networkconf_id` (the untagged VLAN), `portconf_id`
+                (a port profile), `isolation`, `autoneg`, `speed`.
+            site: Site slug or display name.
+
+        Returns:
+            The port's configuration before and after, the fields that changed,
+            and whether the controller is holding each one.
+        """
+        device = await self.get_device_details(device_mac, site=site)
+        if not device:
+            raise ValueError(f"No device matched '{device_mac}' on site {self._target_site(site)}.")
+
+        raw = device.raw if hasattr(device, "raw") else device
+        device_type = str(raw.get("type") or "")
+        if not device_type.startswith(SWITCH_TYPES):
+            raise ValueError(
+                f"Device '{raw.get('name') or device_mac}' is a {device_type}, which has no switch ports."
+            )
+
+        ports = raw.get("port_table") or []
+        valid = {p.get("port_idx") for p in ports if isinstance(p, dict)}
+        if valid and port_idx not in valid:
+            raise ValueError(
+                f"This switch has no port {port_idx}. It has: {sorted(v for v in valid if v is not None)}."
+            )
+
+        overrides = [dict(o) for o in (raw.get("port_overrides") or []) if isinstance(o, dict)]
+        target = next((o for o in overrides if o.get("port_idx") == port_idx), None)
+        before = dict(target) if target else {"port_idx": port_idx}
+        if target is None:
+            target = {"port_idx": port_idx}
+            overrides.append(target)
+        target.update(settings)
+
+        response = await self._request(
+            "put", f"/rest/device/{raw.get('_id')}", {"port_overrides": overrides}, site=site, return_raw=True
+        )
+        self._require_ok(response, f"configure port {port_idx} of '{raw.get('name') or device_mac}'", site)
+        self._connection._invalidate_cache(CACHE_PREFIX_DEVICES)
+
+        await asyncio.sleep(self.WRITE_SETTLE_SECONDS)
+        stored = next(
+            (o for o in await self.get_port_overrides(device_mac, site=site) if o.get("port_idx") == port_idx),
+            {},
+        )
+        applied = {k: stored.get(k) for k, v in settings.items() if stored.get(k) == v}
+        ignored = [
+            {"field": k, "requested": v, "stored": stored.get(k)}
+            for k, v in settings.items()
+            if stored.get(k) != v
+        ]
+        return {
+            "port_idx": port_idx,
+            "before": before,
+            "after": stored,
+            "applied": applied,
+            "ignored": ignored,
+        }

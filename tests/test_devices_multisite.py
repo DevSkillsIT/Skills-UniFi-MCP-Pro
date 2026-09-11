@@ -118,7 +118,7 @@ class TestManageDevice:
     def test_every_documented_action_is_accepted(self):
         from src.tools.devices import DEVICE_ACTIONS
 
-        assert DEVICE_ACTIONS == {"reboot", "adopt", "rename", "locate", "upgrade", "set_radio"}
+        assert DEVICE_ACTIONS == {"reboot", "adopt", "rename", "locate", "upgrade", "set_radio", "set_port"}
 
     def test_each_action_states_its_consequence(self):
         """A confirmation prompt without a consequence is not a decision."""
