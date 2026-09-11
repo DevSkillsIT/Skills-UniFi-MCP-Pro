@@ -6,6 +6,7 @@ that work in both MCP server mode and dev console mode.
 
 import json
 import logging
+import os
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 if TYPE_CHECKING:
@@ -16,6 +17,56 @@ logger = logging.getLogger("unifi-network-mcp")
 # Import site resolver for display name → slug resolution
 from src.utils.site_resolver import resolve_site_identifier
 from src.exceptions import InvalidSiteParameterError, SiteForbiddenError, SiteNotFoundError
+
+
+# Verbs that name a tool which changes the controller. Kept as an explicit list
+# rather than inferred, so what counts as a mutation is auditable and a new tool
+# is classified the moment it is named.
+MUTATING_VERBS = (
+    "create_", "update_", "delete_", "manage_", "set_", "toggle_", "archive_",
+    "revoke_", "restart_", "reboot_", "adopt_", "upgrade_", "block_", "unblock_",
+    "rename_", "authorize", "unauthorize", "force_", "enable_", "disable_",
+)
+
+
+def is_mutating_tool(tool_name: str) -> bool:
+    """Whether `tool_name` changes the controller rather than reading it."""
+    return any(verb in tool_name for verb in MUTATING_VERBS)
+
+
+def meta_tools_may_write() -> bool:
+    """Whether unifi_execute and unifi_batch may run a tool that writes.
+
+    They may not, by default, and that is a deliberate restriction rather than
+    caution. A host that gates tools by name -- which is how Claude Code and
+    every MCP client works -- sees only `unifi_execute` or `unifi_batch` when a
+    call goes through them. The tool actually being run is an argument, so a
+    tool the operator declined is reachable by naming it inside one of these
+    instead, and an allow-list that reads as read-only grants everything.
+
+    That has already happened here: an allow-list carrying `unifi_list_clients`,
+    `unifi_get_ap_stats` and `unifi_execute` side by side looks like read-only
+    access and is not.
+
+    Set UNIFI_META_ALLOW_WRITES=true where a batch of writes is genuinely wanted
+    and the host's own gate is not being relied on.
+    """
+    return os.getenv("UNIFI_META_ALLOW_WRITES", "").strip().lower() in ("true", "1", "yes")
+
+
+def refuse_mutation(tool_name: str, via: str) -> dict:
+    """The refusal, saying what to do instead rather than only what failed."""
+    return {
+        "success": False,
+        "error": (
+            f"'{tool_name}' changes the controller, and {via} will not run it. Call "
+            f"'{tool_name}' directly so your client can apply its own permission rules to that "
+            f"name: routed through {via}, the only name your client sees is '{via}' itself. "
+            f"Set UNIFI_META_ALLOW_WRITES=true on the server to lift this."
+        ),
+        "tool": tool_name,
+        "hint": f"Use {tool_name} directly, with the same arguments.",
+    }
 
 
 async def resolve_site_for_call(site: Optional[str]) -> Optional[str]:
@@ -185,6 +236,11 @@ The site resolver will:
 4. Execute the tool in the context of the specified site
 5. Restore the original site context after execution
 
+READ-ONLY BY DEFAULT: a tool that changes the controller is refused here and must
+be called directly, so your client can apply its permission rules to that tool's
+own name. Routed through this one, the only name your client sees is
+unifi_execute.
+
 For bulk/parallel operations, use unifi_batch instead.""",
     )
     async def execute_handler(tool: str, arguments: dict = None, site: str = None) -> dict:
@@ -200,6 +256,9 @@ For bulk/parallel operations, use unifi_batch instead.""",
         """
         if arguments is None:
             arguments = {}
+
+        if is_mutating_tool(tool) and not meta_tools_may_write():
+            return refuse_mutation(tool, "unifi_execute")
 
         if site is not None:
             if not tool_accepts_site(server, tool):
@@ -265,7 +324,11 @@ MULTI-SITE SUPPORT:
 - Per-operation site: Each operation can specify its own site parameter
 - Priority: Per-operation site > Global site > Default site
 
-USE FOR: Bulk operations, parallel execution, long-running tasks, multi-site batch queries.
+READ-ONLY BY DEFAULT: an operation naming a tool that changes the controller is
+refused and must be called directly, so your client can apply its permission
+rules to that tool's own name.
+
+USE FOR: Bulk queries, parallel execution, long-running reads, multi-site batch queries.
 FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
     )
     async def batch_handler(operations: List[dict], site: str = None) -> dict:
@@ -291,6 +354,10 @@ FOR SINGLE OPERATIONS: Use unifi_execute instead (returns result directly).""",
 
             if not tool:
                 errors.append({"index": i, "error": "Missing 'tool' field"})
+                continue
+
+            if is_mutating_tool(tool) and not meta_tools_may_write():
+                errors.append({"index": i, "tool": tool, **refuse_mutation(tool, "unifi_batch")})
                 continue
 
             # Determine effective site parameter (priority: per-operation > global)
