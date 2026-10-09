@@ -1,5 +1,8 @@
 # Environment variables
 .env
+# Any env variant (backups like .env.bak-<date>, .env.local) - only the example is versioned.
+.env.*
+!.env.example
 
 # Python
 __pycache__/
